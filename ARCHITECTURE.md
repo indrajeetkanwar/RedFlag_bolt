@@ -58,35 +58,48 @@ index.html  ->  src/main.tsx  ->  src/App.tsx (mounts <App/> in StrictMode)
 `src/App.tsx` is the **entire UI in one file**. It is a small screen state machine:
 
 ```ts
-type Screen = 'home' | 'check' | 'analyzing' | 'result' | 'reports' | 'report';
+type Screen = 'home' | 'check' | 'analyzing' | 'result' | 'reports' | 'report' | 'cantRead';
 ```
 
 `App` holds all shared state (`useState`) and renders exactly one screen component at a
 time based on `screen`. Key shared state:
 
 - `vehicleNumber` — the plate string, shared by the check flow, the reports search, and
-  the report form (defaults to `"KA 01 AB 1234"`).
+  the report form (defaults to `"KA 01 AB 1234"`). Set from the AI extraction result on
+  a successful screenshot read.
 - `checkResult: VehicleCheckResult | null` — the last lookup result.
+- `cantRead: CantReadInfo | null` — why the `cantRead` screen is showing
+  (`low_confidence` vs `error`).
 - `selectedCategories`, `submitted`, `submitting`, `submitError` — report-form state.
 
 ### Screens
 
 | `screen`      | Component          | What it does / data call                                                       |
 |---------------|--------------------|-------------------------------------------------------------------------------|
-| `home`        | `Home`             | Hero + upload affordance + "how it works" + "something happened?" entry. Any file pick or button press → `check`. |
-| `check`       | `CheckRide`        | Upload UI + manual plate entry. File pick **or** "Check vehicle" → `startAnalysis` / `runManualCheck`. |
-| `analyzing`   | `Analyzing`        | Purely visual loading state shown while `checkVehicle()` runs.                  |
+| `home`        | `Home`             | Hero + upload affordance + "how it works" + "something happened?" entry. Drop-zone file pick → `analyzeScreenshot`; buttons → `check`. |
+| `check`       | `CheckRide`        | Upload UI + manual plate entry. File pick → `analyzeScreenshot`; "Check vehicle" → `runManualCheck`. |
+| `analyzing`   | `Analyzing`        | Purely visual loading state shown while extraction + `checkVehicle()` run.      |
+| `cantRead`    | `CantRead`         | Shown when extraction returns `low_confidence` or `error`. "Upload another screenshot" / "Enter vehicle number manually". Never proceeds to a lookup. |
 | `result`      | `Result`           | Renders green/amber/red from `checkResult.resultKind`; safety-note copy varies by state. |
 | `reports`     | `CommunityReports` | Calls `getCommunityReports(vehicle.id)` in a `useEffect`; lists anonymised reports. |
 | `report`      | `ReportRide` / `Submitted` | Report form → `submitReport(...)`; on success swaps to the `Submitted` confirmation. |
 
 Other components in the file: `Header`, `BottomNav`, `FooterLinks`.
 
-### Screenshot upload is a stub
+### Screenshot upload flow (Phase 3)
 
-Selecting a file **does not** do OCR or call any AI. `handleFile` just triggers
-`startAnalysis()`, which checks the current `vehicleNumber`. Real screenshot → plate
-extraction (Gemini) is Phase 3 and not built. See §7.
+`handleFile` reads the picked `File` and calls `analyzeScreenshot(file)`:
+
+1. `setScreen('analyzing')`
+2. `extractRideDetails(file)` from `@/lib/ai` (see §4a) — currently the **mock**
+   provider, no SDK, no network.
+3. `status: 'success'` → set `vehicleNumber` to the read plate, then
+   `lookupAndShow()` → `checkVehicle()` → `result`.
+4. `status: 'low_confidence'` or `'error'` → `setScreen('cantRead')`. The app **never**
+   runs a database lookup on an unread / low-confidence plate
+   (`PROJECT_CONTEXT.md` §12, §14).
+
+The image is passed straight to the provider and never uploaded or stored (§18).
 
 ---
 
@@ -132,6 +145,43 @@ columns; there is no generated Supabase types file yet.
 
 ---
 
+## 4a. AI provider abstraction — `src/lib/ai/`
+
+Per `PROJECT_CONTEXT.md` §11, §13, §32: AI returns **structured** data; the app makes
+the deterministic decisions; providers are swappable behind one interface.
+
+| File              | Contents                                                                 |
+|-------------------|------------------------------------------------------------------------|
+| `types.ts`        | `AIProvider` interface, `ExtractedRideDetails` (all fields nullable + per-field `confidence` 0..1), `ScreenshotInput`, `ExtractionOutcome` (`success` \| `low_confidence` \| `error`). |
+| `mockProvider.ts` | `mockProvider: AIProvider` — **no SDK, no network**. Returns canned structured data after a ~1.2 s delay. Which case it returns is driven by the picked file's **name** (see table below). |
+| `index.ts`        | `getAIProvider()` (reads `VITE_AI_PROVIDER`, default `"mock"`), `extractRideDetails(file)` (calls the provider, then applies the confidence gate), `VEHICLE_NUMBER_CONFIDENCE_THRESHOLD = 0.8`. |
+
+**Confidence gate** (`extractRideDetails` in `index.ts`): the outcome is `success` only
+if `vehicleNumber` is non-empty **and** `confidence.vehicleNumber >= 0.8`. Otherwise
+`low_confidence`. A thrown provider error becomes `error`. The mock never returns a
+guessed number — low-confidence cases return `vehicleNumber: null`
+(`PROJECT_CONTEXT.md` §12).
+
+**Mock file-name triggers** (for manual testing):
+
+| File name contains                        | Result                          |
+|------------------------------------------|---------------------------------|
+| `blur` / `lowconf` / `unclear` / `unreadable` / `fail` | `low_confidence` (number = null) |
+| `clear`                                   | reads `KA 05 MN 7788` → green   |
+| `caution`                                 | reads `KA 03 CD 4567` → amber   |
+| anything else                             | reads `KA 01 AB 1234` → red     |
+
+The three "good" plates match `supabase/seed.sql`, so an upload produces a real
+green / amber / red result end to end.
+
+**Not implemented yet:** `classifyReport` (Phase 4) and `moderateContent` (Phase 5)
+are named in `PROJECT_CONTEXT.md` §32 but not on the `AIProvider` interface yet. Real
+Gemini is a future `providers['gemini']` entry — and because a Vite build ships all
+code to the browser, that provider must call Gemini via a server-side function (e.g. a
+Supabase Edge Function), not with a `VITE_` API key.
+
+---
+
 ## 5. Database
 
 Schema migration: `supabase/migrations/20260910053117_create_spotrealredflag_schema.sql`
@@ -170,9 +220,10 @@ Edge Function or the service-role key), never from the browser.
 |--------------------------|------------------------|-----------------------------------------------|
 | `VITE_SUPABASE_URL`      | `src/lib/supabase.ts`  | `https://<project-ref>.supabase.co`           |
 | `VITE_SUPABASE_ANON_KEY` | `src/lib/supabase.ts`  | anon **public** key                            |
+| `VITE_AI_PROVIDER`       | `src/lib/ai/index.ts`  | optional; `"mock"` (default). Only `"mock"` is implemented. |
 
 - Vite only exposes vars prefixed `VITE_` to client code, via `import.meta.env`.
-  Types for these two are declared in `src/vite-env.d.ts`.
+  Types for these are declared in `src/vite-env.d.ts`.
 - `src/lib/supabase.ts` throws a clear, named error at startup if either is missing
   (rather than white-screening).
 - `.env` lives at the repo root, is **git-ignored** (`.gitignore` already lists `.env`
@@ -208,7 +259,8 @@ CLI-managed migrations.
 | Area                                  | Status                                                      | Phase |
 |---------------------------------------|------------------------------------------------------------|-------|
 | Supabase wired to real data           | **Done** — `src/lib/data.ts` is fully Supabase-backed       | 2     |
-| Screenshot → plate extraction (Gemini)| Not started — upload is a stub, no AI provider abstraction  | 3     |
+| AI provider abstraction + upload flow  | **Done (mock)** — `src/lib/ai/` + `analyzeScreenshot` wired into upload, with the `cantRead` low-confidence branch | 3 |
+| Real Gemini extraction                 | Not started — needs a server-side function (Edge Function) to hold the key; then add `providers['gemini']` | 3 |
 | AI report categorisation              | Not started — categories are user-selected checkboxes       | 4     |
 | Abuse / spam / rate limiting          | Not started — `searches` table exists to support it later   | 5     |
 | Evidence upload UI + Storage + retention | Not started — `report_evidence` table exists, no UI, "Add screenshot" button is inert | 5–6 |
@@ -241,3 +293,18 @@ What is Vite-specific and will change in a Next.js migration:
 
 Until that migration happens, treat Vite as the source of truth for build/dev/env
 mechanics and `PROJECT_CONTEXT.md` as the source of truth for product decisions.
+
+---
+
+## 9. Local browser check — `npm run screenshot`
+
+`scripts/drive.mjs` (Playwright, `channel: 'chrome'` — uses installed Chrome, no
+bundled browser) drives the running app at 390 px width and screenshots each state
+into `./screenshots/` (git-ignored). It fails on any console or page error.
+
+Prereq: `npm run dev` running on `http://localhost:5173` (override with `APP_URL`).
+
+Path it walks: Home → upload `scripts/fixtures/ride.png` → red result → "Check another
+ride" → upload `scripts/fixtures/blur.png` → `cantRead` screen → "Enter vehicle number
+manually" → type `KA 03 CD 4567` → amber result. The fixtures are 1×1 PNGs; the mock
+provider keys off their file names (§4a).

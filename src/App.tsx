@@ -10,11 +10,14 @@ import {
   Flag,
   Gauge,
   HeartHandshake,
+  ImageOff,
   Info,
   LockKeyhole,
   Menu,
   MessageSquarePlus,
   Paperclip,
+  PencilLine,
+  RefreshCw,
   Search,
   Shield,
   ShieldCheck,
@@ -23,11 +26,14 @@ import {
   X,
 } from 'lucide-react';
 import { checkVehicle, getCommunityReports, submitReport } from '@/lib/data';
+import { extractRideDetails } from '@/lib/ai';
 import type { CommunityReportView, ResultKind, VehicleCheckResult } from '@/lib/types';
 
 const logoUrl = '/logo.png';
 
-type Screen = 'home' | 'check' | 'analyzing' | 'result' | 'reports' | 'report';
+type Screen = 'home' | 'check' | 'analyzing' | 'result' | 'reports' | 'report' | 'cantRead';
+
+type CantReadInfo = { reason: 'low_confidence' | 'error'; message: string };
 
 const categories = ['Harassment / inappropriate behaviour', 'Unsafe driving', 'Threatening behaviour', 'Driver followed me', 'Driver contacted me after the ride', 'Verbal abuse', 'Route-related concern', 'Other'];
 
@@ -35,26 +41,49 @@ function App() {
   const [screen, setScreen] = useState<Screen>('home');
   const [checkResult, setCheckResult] = useState<VehicleCheckResult | null>(null);
   const [vehicleNumber, setVehicleNumber] = useState('KA 01 AB 1234');
+  const [cantRead, setCantRead] = useState<CantReadInfo | null>(null);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
   const openCheck = (): void => setScreen('check');
-  const startAnalysis = async (): Promise<void> => {
+
+  const lookupAndShow = async (registrationNumber: string): Promise<void> => {
     setScreen('analyzing');
-    const result = await checkVehicle(vehicleNumber);
+    const result = await checkVehicle(registrationNumber);
     setCheckResult(result);
     setScreen('result');
   };
+
+  const runManualCheck = (): void => {
+    void lookupAndShow(vehicleNumber);
+  };
+
+  const analyzeScreenshot = async (file: File): Promise<void> => {
+    setScreen('analyzing');
+    const outcome = await extractRideDetails(file);
+
+    if (outcome.status === 'success') {
+      setVehicleNumber(outcome.vehicleNumber);
+      await lookupAndShow(outcome.vehicleNumber);
+      return;
+    }
+
+    // Never fall through to a database lookup on an uncertain plate
+    // (PROJECT_CONTEXT.md §12, §14). Ask the user to retry or type it in.
+    setCantRead(
+      outcome.status === 'low_confidence'
+        ? { reason: 'low_confidence', message: "We couldn't clearly read the vehicle number." }
+        : { reason: 'error', message: outcome.message }
+    );
+    setScreen('cantRead');
+  };
+
   const handleFile = (event: ChangeEvent<HTMLInputElement>): void => {
-    if (event.target.files?.length) void startAnalysis();
-  };
-  const runManualCheck = async (): Promise<void> => {
-    setScreen('analyzing');
-    const result = await checkVehicle(vehicleNumber);
-    setCheckResult(result);
-    setScreen('result');
+    const file = event.target.files?.[0];
+    event.target.value = ''; // let the same file be picked again after a retry
+    if (file) void analyzeScreenshot(file);
   };
   const goToReports = (): void => setScreen('reports');
   const toggleCategory = (category: string): void => {
@@ -89,9 +118,10 @@ function App() {
     <div className="app-shell">
       <Header screen={screen} onNavigate={setScreen} />
       <main className="page-content">
-        {screen === 'home' && <Home onCheck={openCheck} onReport={() => setScreen('report')} onReports={goToReports} />}
+        {screen === 'home' && <Home onCheck={openCheck} onFile={handleFile} onReport={() => setScreen('report')} onReports={goToReports} />}
         {screen === 'check' && <CheckRide onBack={() => setScreen('home')} onFile={handleFile} onManual={runManualCheck} vehicleNumber={vehicleNumber} setVehicleNumber={setVehicleNumber} />}
         {screen === 'analyzing' && <Analyzing />}
+        {screen === 'cantRead' && cantRead && <CantRead info={cantRead} onFile={handleFile} onManual={() => { setCantRead(null); setScreen('check'); }} />}
         {screen === 'result' && checkResult && <Result result={checkResult} vehicleNumber={vehicleNumber} onBack={openCheck} onReports={goToReports} onReport={() => setScreen('report')} />}
         {screen === 'reports' && checkResult && <CommunityReports vehicleNumber={vehicleNumber} setVehicleNumber={setVehicleNumber} onBack={() => setScreen('home')} onCheck={runManualCheck} onUpload={openCheck} result={checkResult} />}
         {screen === 'report' && (submitted ? <Submitted onHome={() => { setSubmitted(false); setScreen('home'); }} /> : <ReportRide selectedCategories={selectedCategories} onToggle={toggleCategory} onSubmit={handleSubmit} onBack={() => setScreen('home')} submitting={submitting} submitError={submitError} />)}
@@ -118,7 +148,7 @@ function Header({ screen, onNavigate }: HeaderProps) {
   );
 }
 
-function Home({ onCheck, onReport, onReports }: { onCheck: () => void; onReport: () => void; onReports: () => void }) {
+function Home({ onCheck, onFile, onReport, onReports }: { onCheck: () => void; onFile: (event: ChangeEvent<HTMLInputElement>) => void; onReport: () => void; onReports: () => void }) {
   return <>
     <section className="hero-section">
       <div className="eyebrow"><HeartHandshake size={14} /> Anonymous solidarity <span className="live-dot" /> Strictly anonymous</div>
@@ -127,7 +157,7 @@ function Home({ onCheck, onReport, onReports }: { onCheck: () => void; onReport:
       <p>Upload your ride screenshot to see whether other women have reported concerns about this vehicle.</p>
     </section>
     <section className="upload-card home-upload">
-      <label className="drop-zone" htmlFor="home-file"><span className="upload-icon"><FileImage size={25} /></span><strong>Drop ride screenshot here</strong><span>Tap to browse your photo library</span><input id="home-file" type="file" accept="image/*" onChange={onCheck} /></label>
+      <label className="drop-zone" htmlFor="home-file"><span className="upload-icon"><FileImage size={25} /></span><strong>Drop ride screenshot here</strong><span>Tap to browse your photo library</span><input id="home-file" type="file" accept="image/*" onChange={onFile} /></label>
       <div className="supported"><span>Supports:</span>{['Uber', 'Ola', 'Rapido', 'Namma Yatri'].map((platform) => <span className="tag" key={platform}>{platform}</span>)}</div>
       <button className="primary-button" onClick={onCheck}>Check my ride <ArrowRight size={18} /></button>
       <button className="text-action" onClick={onCheck}>Enter vehicle number manually <ArrowRight size={15} /></button>
@@ -154,6 +184,19 @@ function CheckRide({ onBack, onFile, onManual, vehicleNumber, setVehicleNumber }
 
 function Analyzing() {
   return <section className="center-state"><div className="scan-orb"><img src={logoUrl} alt="SpotRealRedFlag" /></div><h1>Checking your ride…</h1><p>Reading the vehicle details and checking community reports.</p><div className="progress-list"><div><Check size={17} /> Identifying vehicle</div><div className="active"><Gauge size={17} /> Checking community reports</div><div className="faded"><span className="empty-circle" /> Almost there</div></div></section>;
+}
+
+function CantRead({ info, onFile, onManual }: { info: CantReadInfo; onFile: (event: ChangeEvent<HTMLInputElement>) => void; onManual: () => void }) {
+  const isError = info.reason === 'error';
+  return <section className="center-state">
+    <div className="scan-orb"><ImageOff size={30} color="#3525cd" /></div>
+    <h1>{isError ? "That screenshot didn't go through" : "We couldn't clearly read the vehicle number"}</h1>
+    <p>{isError ? info.message : 'The screenshot was a little unclear. Try a sharper one, or type the vehicle number in yourself.'}</p>
+    <div style={{ width: '100%', maxWidth: 340, marginTop: 26 }}>
+      <label className="primary-button" htmlFor="retry-file"><RefreshCw size={17} /> Upload another screenshot<input id="retry-file" type="file" accept="image/*" onChange={onFile} hidden /></label>
+      <button className="outline-button" onClick={onManual}><PencilLine size={16} /> Enter vehicle number manually</button>
+    </div>
+  </section>;
 }
 
 function Result({ result, vehicleNumber, onBack, onReports, onReport }: { result: VehicleCheckResult; vehicleNumber: string; onBack: () => void; onReports: () => void; onReport: () => void }) {
@@ -204,7 +247,7 @@ function FooterLinks({ onReports }: { onReports: () => void }) {
 }
 
 function BottomNav({ screen, onNavigate }: { screen: Screen; onNavigate: (screen: Screen) => void }) {
-  return <nav className="bottom-nav"><button className={screen === 'home' ? 'active' : ''} onClick={() => onNavigate('home')}><Shield size={19} /><span>Home</span></button><button className={['check', 'analyzing', 'result', 'reports'].includes(screen) ? 'active' : ''} onClick={() => onNavigate('check')}><Search size={19} /><span>Check</span></button><button className={screen === 'report' ? 'active' : ''} onClick={() => onNavigate('report')}><Flag size={19} /><span>Report</span></button><button className="desktop-only"><Menu size={19} /><span>More</span></button></nav>;
+  return <nav className="bottom-nav"><button className={screen === 'home' ? 'active' : ''} onClick={() => onNavigate('home')}><Shield size={19} /><span>Home</span></button><button className={['check', 'analyzing', 'result', 'reports', 'cantRead'].includes(screen) ? 'active' : ''} onClick={() => onNavigate('check')}><Search size={19} /><span>Check</span></button><button className={screen === 'report' ? 'active' : ''} onClick={() => onNavigate('report')}><Flag size={19} /><span>Report</span></button><button className="desktop-only"><Menu size={19} /><span>More</span></button></nav>;
 }
 
 export default App;
