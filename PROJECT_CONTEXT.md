@@ -1190,14 +1190,17 @@ via an anonymous localStorage client_key (NOT auth).
 
 Green/Amber/Red classification remains deterministic app code in checkVehicle (§10).
 
-Migrations 1 and 2 are applied to the live project. The Gemini Edge Functions and
-migration 3 are not deployed yet, and the frontend is not on Vercel yet.
+Migrations 1-3 are applied and both Edge Functions are deployed. A round of pre-launch
+security hardening is done (migrations 4-6 + shared function middleware): searches is
+write-only, per-IP rate limiting on the AI functions (ai_calls table, hashed IPs),
+4 MB + magic-byte image validation, CORS locked to an ALLOWED_ORIGIN secret, generic
+error messages, and a public_reports view. npm audit is clean for shipped deps.
 
 Current objective:
 
-Go live — deploy the two Edge Functions with the GEMINI_API_KEY secret, run migration
-3, set VITE_AI_PROVIDER=gemini, deploy the frontend to Vercel. Full runbook + exact
-env vars / secrets in DEPLOYMENT.md.
+Go live — apply migrations 4-6, set the IP_HASH_SALT secret, redeploy the functions,
+set VITE_AI_PROVIDER=gemini, deploy the frontend to Vercel, then set ALLOWED_ORIGIN and
+redeploy the functions. Full runbook + exact env vars / secrets in DEPLOYMENT.md.
 
 After that:
 

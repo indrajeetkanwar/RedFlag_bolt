@@ -197,14 +197,28 @@ browser ◀──── ExtractedRideDetails JSON ──────────
 ```
 
 - Function code: `supabase/functions/extract-ride-details/` — `index.ts` (Deno HTTP
-  server, CORS, env, fetch) + `gemini.ts` (pure prompt / schema / response-mapping,
-  unit-tested by `scripts/test-lib.mjs`).
-- Model is `GEMINI_MODEL` (default `gemini-2.0-flash`) — cheap, fast, good OCR, JSON
+  server) + `gemini.ts` (pure prompt / schema / response-mapping, unit-tested by
+  `scripts/test-lib.mjs`). Shared hardening in `supabase/functions/_shared/`
+  (`security.ts` = CORS + rate limit, `image.ts` = magic-byte sniff).
+- Model is `GEMINI_MODEL` (default `gemini-3.6-flash`) — cheap, fast, good OCR, JSON
   mode. Swap without code changes.
 - Prompt forbids guessing: an illegible plate → `vehicle_number: null`; the mapper
   also forces `confidence.vehicleNumber = 0` whenever the number is null.
 - No auth (`--no-verify-jwt`); the browser still sends the anon key as `apikey`.
 - The screenshot is never stored — it exists only for the request (`§18`).
+- **Hardening (both functions):**
+  - CORS allowlist — `ALLOWED_ORIGIN` secret (the Vercel URL) + `http://localhost:5173`.
+    A browser request from any other `Origin` gets `403`. Requests with no `Origin`
+    (curl/server) pass but are still rate-limited.
+  - Per-IP rate limit — ≤ 10 calls per IP per hour per function, tracked in the
+    `ai_calls` table (SHA-256 of `IP_HASH_SALT:ip`, never the raw IP). Over the limit
+    → `429`, generic message. Fails open on a DB error.
+  - `extract-ride-details`: image type is **sniffed from the base64 magic bytes**
+    (JPEG/PNG/WebP/HEIC) — the client `mimeType` is ignored; anything else → `400`.
+    Size cap `4 MB` → `413` with a user-facing message.
+  - Gemini failures are logged server-side and returned to the client as a single
+    generic `"Something went wrong — please try again."` — the provider error body is
+    never proxied.
 - Deploy + secrets: see `DEPLOYMENT.md`.
 
 ### Report classification (Phase 4)
@@ -235,21 +249,28 @@ browser ◀──── ExtractedRideDetails JSON ──────────
 Migrations (run in order, in the Supabase SQL Editor — each has an authoritative
 top comment):
 
-1. `supabase/migrations/20260910053117_create_spotrealredflag_schema.sql` — core tables.
-2. `supabase/migrations/20260910073537_spam_safeguards.sql` — `client_key` columns +
-   `reports` CHECK constraints + indexes (see §5a).
-3. `supabase/migrations/20260910082139_report_ai_classification.sql` — `reports.ai_*`
-   metadata columns (Phase 4). Additive/nullable; not release-blocking (the insert
-   degrades gracefully).
+1. `20260910053117_create_spotrealredflag_schema.sql` — core tables.
+2. `20260910073537_spam_safeguards.sql` — `client_key` columns + `reports` CHECK
+   constraints + indexes (see §5a).
+3. `20260910082139_report_ai_classification.sql` — `reports.ai_*` metadata columns
+   (Phase 4). Additive/nullable; not release-blocking (the insert degrades gracefully).
+4. `20260910110828_drop_searches_public_select.sql` — removes the public SELECT policy
+   on `searches` (the client only writes it). Security.
+5. `20260910110829_ai_calls_rate_limit.sql` — `ai_calls` ledger for the Edge Function
+   per-IP rate limit. RLS on, **no policies** (only service_role touches it).
+6. `20260910110830_public_reports_view.sql` — `public_reports` view (safe columns
+   only); `getCommunityReports()` reads it.
 
 Seed data for testing: `supabase/seed.sql`.
 
-| Table             | Purpose                                    | Key columns                                                                 |
+| Table / view      | Purpose                                    | Key columns                                                                 |
 |-------------------|--------------------------------------------|---------------------------------------------------------------------------|
 | `vehicles`        | One row per distinct vehicle               | `registration_number` (raw), `normalized_registration_number` (**unique**) |
 | `reports`         | Community-submitted reports                | `vehicle_id` FK, `platform`, `categories text[]`, `description`, `ride_date`, `status`, `client_key`, `ai_categories`, `ai_severity`, `ai_confidence`, `ai_personal_info_flag` |
+| `public_reports`  | **View** — safe read surface for the UI    | `id`, `vehicle_id`, `platform`, `categories`, `description`, `ride_date`, `created_at`, `status` (no `client_key` / `ai_*`). `security_invoker = on`. |
 | `report_evidence` | Optional evidence files (schema only, unused by the app yet) | `report_id` FK, `storage_path`, `expires_at` (retention) |
-| `searches`        | Audit log of every check (analytics / abuse detection) | `vehicle_id` FK (nullable), `search_term` (raw), `platform`, `client_key` |
+| `searches`        | Write-only audit log of every check        | `vehicle_id` FK (nullable), `search_term` (raw), `platform`, `client_key`. INSERT-only for anon; no public SELECT (migration 4). |
+| `ai_calls`        | Edge Function rate-limit ledger            | `ip_hash` (salted SHA-256), `function_name`, `called_at`. No anon access at all. |
 
 - IDs are `uuid` via `gen_random_uuid()` (needs the `pgcrypto` extension — the
   migration enables it).
@@ -258,15 +279,20 @@ Seed data for testing: `supabase/seed.sql`.
 
 ### Row Level Security
 
-RLS is **ON** for all four tables. Every table has exactly two policies, both
-`TO anon, authenticated`:
+RLS is **ON** for every table. Policies are `TO anon, authenticated`:
 
-- `public_select_*` — `USING (true)` (anyone can read)
-- `public_insert_*` — `WITH CHECK (true)` (anyone can insert)
+| Table            | SELECT policy | INSERT policy |
+|------------------|---------------|---------------|
+| `vehicles`       | public `USING (true)` | public `WITH CHECK (true)` |
+| `reports`        | public `USING (true)` (see residual note in migration 6) | public `WITH CHECK (true)` |
+| `report_evidence`| public `USING (true)` | public `WITH CHECK (true)` |
+| `searches`       | **none** — write-only (migration 4) | public `WITH CHECK (true)` |
+| `ai_calls`       | **none** | **none** — service_role only |
 
-There are **no** UPDATE or DELETE policies — reports cannot be edited or removed
-through the API. Future moderation would flip `reports.status` server-side (e.g. an
-Edge Function or the service-role key), never from the browser.
+No UPDATE or DELETE policies anywhere — reports can't be edited or removed through the
+API. Future moderation flips `reports.status` server-side (service-role / Edge
+Function), never from the browser. The `public_reports` view (safe columns) is the
+intended public read path for report content.
 
 ---
 
@@ -307,8 +333,11 @@ Migration `20260910073537_spam_safeguards.sql` + `src/lib/data.ts` +
 
 | Secret           | Used by                                  | Notes                          |
 |------------------|------------------------------------------|--------------------------------|
-| `GEMINI_API_KEY` | `supabase/functions/extract-ride-details` | from Google AI Studio          |
-| `GEMINI_MODEL`   | same (optional)                          | default `gemini-2.0-flash`      |
+| `GEMINI_API_KEY` | both Edge Functions                       | from Google AI Studio          |
+| `GEMINI_MODEL`   | both (optional)                          | default `gemini-3.6-flash`      |
+| `ALLOWED_ORIGIN` | both (`_shared/security.ts`)             | the Vercel site URL. Unset ⇒ only `localhost:5173` allowed. Set after the Vercel URL exists. |
+| `IP_HASH_SALT`   | both (`_shared/security.ts`)             | random 32-byte hex; salts the IP hash for `ai_calls`. Unset ⇒ a weak built-in fallback + a console warning. |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | both (rate limit) | **auto-injected** by Supabase into deployed functions — do not set manually. |
 
 - Vite only exposes vars prefixed `VITE_` to client code, via `import.meta.env`.
   Types for these are declared in `src/vite-env.d.ts`.
@@ -385,7 +414,7 @@ mechanics and `PROJECT_CONTEXT.md` as the source of truth for product decisions.
 |---------------------|----------------------------------------------------------------------------|
 | `npm run typecheck` | `tsc --noEmit` over `src` (not `supabase/functions` — that's Deno).           |
 | `npm run lint`      | ESLint over `src` + `scripts` (`supabase/functions` is ignored).             |
-| `npm run test:lib`  | Offline unit tests: report content rules (`reportValidation.ts`), Gemini extraction mapping (`extract-ride-details/gemini.ts`), report-classification mapping (`classify-report/classify.ts`), and `mockProvider.classifyReport`. Bundles the TS with esbuild, asserts, exits non-zero on failure. |
+| `npm run test:lib`  | Offline unit tests: report content rules (`reportValidation.ts`), Gemini extraction & classification mapping (`*/gemini.ts`, `*/classify.ts`), `mockProvider.classifyReport`, and the Edge Function image magic-byte sniff (`_shared/image.ts`). Bundles the TS with esbuild, asserts, exits non-zero on failure. |
 | `npm run test:gemini` | `GEMINI_API_KEY=… npm run test:gemini -- path/to/shot.png` — live call to the real Gemini API with the extraction function's exact prompt/schema; prints the mapped result + whether the gate passes. No deploy needed. |
 | `npm run screenshot`| Playwright (`channel: 'chrome'` — installed Chrome, no bundled browser) drives the running app at 390 px and screenshots each state into `./screenshots/` (git-ignored). Fails on any console/page error. |
 
