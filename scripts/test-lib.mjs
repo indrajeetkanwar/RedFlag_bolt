@@ -7,7 +7,7 @@
  * Covers: report content validation (src/lib/reportValidation.ts) and the Gemini
  * response mapping (supabase/functions/extract-ride-details/gemini.ts).
  */
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -76,6 +76,19 @@ eq('empty categories -> ["Other"]',
 eq('bad severity -> low', c.toReportClassification({ categories: ['Other'], severity: 'catastrophic', confidence: 0.5, personal_info_likely: false }).severity, 'low');
 eq('confidence clamped', c.toReportClassification({ categories: ['Other'], severity: 'low', confidence: 9, personal_info_likely: false }).confidence, 1);
 eq('personal info flag coerced to boolean', c.toReportClassification({ categories: ['Other'], severity: 'low', confidence: 0.5, personal_info_likely: 1 }).personalInfoLikely, true);
+
+// --- edge function image sniffing ------------------------------------
+const img = await bundle('supabase/functions/_shared/image.ts');
+const b64 = (bytes) => Buffer.from(bytes).toString('base64');
+console.log('sniffImageMime:');
+eq('jpeg magic', img.sniffImageMime(b64([0xff, 0xd8, 0xff, 0xe0, 0, 16, 0x4a, 0x46, 0x49, 0x46, 0, 1])), 'image/jpeg');
+eq('png magic', img.sniffImageMime(b64([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13])), 'image/png');
+eq('webp magic', img.sniffImageMime(b64([0x52, 0x49, 0x46, 0x46, 0x24, 0, 0, 0, 0x57, 0x45, 0x42, 0x50])), 'image/webp');
+eq('heic magic', img.sniffImageMime(b64([0, 0, 0, 0x18, 0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63])), 'image/heic');
+eq('gif rejected', img.sniffImageMime(b64([0x47, 0x49, 0x46, 0x38, 0x39, 0x61, 1, 0, 1, 0, 0, 0])), null);
+eq('text rejected', img.sniffImageMime(Buffer.from('not an image at all really').toString('base64')), null);
+eq('too short rejected', img.sniffImageMime(b64([0xff, 0xd8])), null);
+eq('real 1x1 png fixture', img.sniffImageMime(readFileSync(join(root, 'scripts/fixtures/ride.png')).toString('base64')), 'image/png');
 
 // --- mock provider classifyReport --------------------------------------
 const m = await bundle('src/lib/ai/mockProvider.ts');

@@ -64,8 +64,10 @@ export async function checkVehicle(registrationNumber: string): Promise<VehicleC
 }
 
 export async function getCommunityReports(vehicleId: string): Promise<CommunityReportView[]> {
+  // Reads the `public_reports` view, not the base table — the view omits `client_key`
+  // and the `ai_*` metadata columns (migration 20260910110830).
   const { data: reportData } = await supabase
-    .from('reports')
+    .from('public_reports')
     .select('id, vehicle_id, platform, categories, description, ride_date, created_at')
     .eq('vehicle_id', vehicleId)
     .eq('status', 'active')

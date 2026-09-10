@@ -31,9 +31,13 @@ Both files in `supabase/migrations/`, **in order**. Either method:
 
 1. `20260910053117_create_spotrealredflag_schema.sql` (idempotent, re-run safe)
 2. `20260910073537_spam_safeguards.sql` (spam safeguards)
-3. `20260910082139_report_ai_classification.sql` ← **new for Phase 4** — adds
-   `reports.ai_*` metadata columns. Additive/nullable; the app degrades gracefully
-   without it (classification just isn't stored).
+3. `20260910082139_report_ai_classification.sql` (Phase 4 `reports.ai_*` columns)
+4. `20260910110828_drop_searches_public_select.sql` — drop `searches` public SELECT
+5. `20260910110829_ai_calls_rate_limit.sql` — `ai_calls` table for the function rate limit
+6. `20260910110830_public_reports_view.sql` — `public_reports` view
+
+Run **all six in order**. 1–3 may already be applied; re-running is safe. 4–6 are the
+security migrations — required before the Vercel deploy.
 
 **or CLI:**
 
@@ -62,36 +66,50 @@ Two functions, both public, both using the same secrets:
 npx supabase login
 npx supabase link --project-ref yojnyfsatgevqbdjmmqm
 
-# set the server-side secrets (NOT VITE_ vars, never in the frontend)
+# server-side secrets (NOT VITE_ vars, never in the frontend / Vercel)
 npx supabase secrets set GEMINI_API_KEY=your-gemini-key
-npx supabase secrets set GEMINI_MODEL=gemini-2.0-flash        # optional, this is the default
+npx supabase secrets set GEMINI_MODEL=gemini-3.6-flash                    # optional (default)
+npx supabase secrets set IP_HASH_SALT=$(openssl rand -hex 32)            # salts the ai_calls IP hash
+# ALLOWED_ORIGIN — set AFTER you have the Vercel URL (step 3):
+#   npx supabase secrets set ALLOWED_ORIGIN=https://your-app.vercel.app
+# Until it's set, only http://localhost:5173 is allowed as a browser Origin.
 
 # deploy both (public — no auth, per PROJECT_CONTEXT.md §4)
 npx supabase functions deploy extract-ride-details --no-verify-jwt
 npx supabase functions deploy classify-report --no-verify-jwt
 ```
 
-`supabase/config.toml` already sets `verify_jwt = false` for both, so future deploys
-keep them public even without the flag.
+`supabase/config.toml` already sets `verify_jwt = false` for both. `SUPABASE_URL` and
+`SUPABASE_SERVICE_ROLE_KEY` are auto-injected into deployed functions — don't set them.
 
-Verify they're up:
+Verify they're up (curl has no `Origin` header, so CORS lets it through; the per-IP
+rate limit still applies — 10 calls/hour/function):
 
 ```bash
-# extraction — expect HTTP 502 {"error":"Gemini API 400: ...invalid image..."}
+# extraction — 1x1 pixel: expect HTTP 200 with vehicleNumber:null + low confidence
+#   (real Gemini call; proves key + model + mapping). A generic 502 = Gemini failed.
 curl -s -X POST \
   "https://yojnyfsatgevqbdjmmqm.supabase.co/functions/v1/extract-ride-details" \
   -H "apikey: <your VITE_SUPABASE_ANON_KEY>" -H "Content-Type: application/json" \
-  -d '{"imageBase64":"aGk=","mimeType":"image/png"}'
+  -d "{\"imageBase64\":\"$(base64 -w0 scripts/fixtures/ride.png)\"}"
+
+# a non-image: expect HTTP 400 "doesn't look like a supported image"
+curl -s -X POST \
+  "https://yojnyfsatgevqbdjmmqm.supabase.co/functions/v1/extract-ride-details" \
+  -H "apikey: <anon>" -H "Content-Type: application/json" \
+  -d '{"imageBase64":"aGVsbG8gd29ybGQgdGhpcyBpcyBub3QgYW4gaW1hZ2U="}'
 
 # classification — expect HTTP 200 with categories / severity / confidence
 curl -s -X POST \
   "https://yojnyfsatgevqbdjmmqm.supabase.co/functions/v1/classify-report" \
-  -H "apikey: <your VITE_SUPABASE_ANON_KEY>" -H "Content-Type: application/json" \
+  -H "apikey: <anon>" -H "Content-Type: application/json" \
   -d '{"description":"The driver kept shouting and was overtaking dangerously the whole ride."}'
 ```
 
-Both proving the function runs and reaches Gemini with the key. A `500`
-`"GEMINI_API_KEY is not configured"` means the secret didn't take.
+All server/Gemini errors now return a generic `"Something went wrong — please try
+again."` — check the function logs (`npx supabase functions logs <name>`) for the real
+reason. If you get `429` while testing, clear the ledger:
+`DELETE FROM ai_calls;` in the SQL Editor.
 
 ---
 
@@ -128,6 +146,20 @@ Redeploy after adding them (Vite inlines env at build time).
 
 > Do **not** put `GEMINI_API_KEY` in Vercel. It only belongs in Supabase secrets.
 
+### 3d. After the first Vercel deploy — lock CORS
+
+Once you have the production URL, set the allowlist secret and redeploy both functions:
+
+```bash
+npx supabase secrets set ALLOWED_ORIGIN=https://your-app.vercel.app
+npx supabase functions deploy extract-ride-details --no-verify-jwt
+npx supabase functions deploy classify-report --no-verify-jwt
+```
+
+Until this is set, the deployed site's calls to the functions will be `403`ed
+(only `localhost:5173` is allowed). If you use Vercel preview URLs, either add the
+specific preview origin too or test previews against `localhost`.
+
 ---
 
 ## 4. Env / secret reference (summary)
@@ -144,8 +176,12 @@ VITE_AI_PROVIDER        = gemini
 
 ```
 GEMINI_API_KEY  = <from Google AI Studio>
-GEMINI_MODEL    = gemini-2.0-flash        (optional)
+GEMINI_MODEL    = gemini-3.6-flash                  (optional, this is the default)
+IP_HASH_SALT    = <openssl rand -hex 32>            (salts the ai_calls IP hash)
+ALLOWED_ORIGIN  = https://your-app.vercel.app       (set in step 3d, after deploy)
 ```
+
+`SUPABASE_URL` / `SUPABASE_SERVICE_ROLE_KEY` are auto-injected — never set them.
 
 ---
 
@@ -166,11 +202,13 @@ GEMINI_MODEL    = gemini-2.0-flash        (optional)
    - Upload a clear ride screenshot → Analyzing → correct green/amber/red for that plate.
    - Upload a blurry / cropped screenshot → **"We couldn't clearly read the vehicle
      number"** screen, no result. (This is the §12 gate — must never show a guessed plate.)
-   - Check the `searches` table in Supabase for a new row per check.
-   - Submit a report → row in `reports` has `ai_categories` / `ai_severity` /
-     `ai_confidence` populated (once migration 3 is applied).
-   - Submit a report with a phone number in the text → rejected with a message.
+   - Upload a non-image / a >4 MB image → clear error, no crash.
+   - `searches` gets a row per check; `reports` rows have `ai_*` populated.
+   - Submit a report with a phone number → rejected with a message.
    - Submit 4 reports quickly → the 4th is rate-limited.
+   - >10 screenshot checks in an hour from one network → `429` / "Too many requests".
+   - Open the deployed site's dev tools → no CORS errors calling the functions (needs
+     `ALLOWED_ORIGIN` set, step 3d).
 
 5. `npm run test:lib` — offline unit tests (content rules + Gemini extraction &
    classification mapping). `npm run screenshot` — drives the mock flow, including the
@@ -185,7 +223,10 @@ GEMINI_MODEL    = gemini-2.0-flash        (optional)
 - **Edge Functions:** `npx supabase functions delete extract-ride-details` /
   `classify-report`. Extraction then returns the `error` outcome → "couldn't read"
   screen; classification silently returns `null` (no suggestion, report still submits).
-- **DB:** migrations 2 and 3 only *add* columns / constraints / indexes. To undo
-  content rules: `ALTER TABLE reports DROP CONSTRAINT reports_description_min_length,
-  DROP CONSTRAINT reports_description_no_contact;`. Columns can stay — nullable and
-  harmless.
+- **DB:** migrations 2, 3, 5, 6 only *add* things. Migration 4 removed a policy — to
+  restore the old (insecure) behaviour: `CREATE POLICY "public_select_searches" ON
+  searches FOR SELECT TO anon, authenticated USING (true);`. To undo content rules:
+  `ALTER TABLE reports DROP CONSTRAINT reports_description_min_length, DROP CONSTRAINT
+  reports_description_no_contact;`.
+- **Rate limit too aggressive:** raise `RATE_LIMIT_PER_HOUR` in
+  `supabase/functions/_shared/security.ts` and redeploy, or `DELETE FROM ai_calls;`.
