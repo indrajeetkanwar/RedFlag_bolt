@@ -200,9 +200,11 @@ browser ◀──── ExtractedRideDetails JSON ──────────
   server) + `gemini.ts` (pure prompt / schema / response-mapping, unit-tested by
   `scripts/test-lib.mjs`). Shared code in `supabase/functions/_shared/`
   (`security.ts` = CORS + rate limit + `callGeminiGenerate`, `image.ts` = magic-byte sniff).
-- Model is `GEMINI_MODEL` (default `gemini-2.5-flash`) — cheap, fast, good OCR, JSON
-  mode. Swap without code changes. `callGeminiGenerate` retries 3× with backoff on a
-  429 / 5xx ("model is experiencing high demand"); a final failure → generic error.
+- Model is `GEMINI_MODEL` (default `gemini-3.6-flash` — the only Flash model available
+  to a newly-created API key; `gemini-2.x-flash` return 404 "not available to new
+  users"). Swap via the secret. `callGeminiGenerate` retries up to 4× with backoff
+  (~5s total) on a 429 / 5xx ("model is experiencing high demand"); a final failure →
+  generic error → the `cantRead` screen.
 - Prompt forbids guessing: an illegible plate → `vehicle_number: null`; the mapper
   also forces `confidence.vehicleNumber = 0` whenever the number is null.
 - No auth (`--no-verify-jwt`); the browser still sends the anon key as `apikey`.
@@ -335,7 +337,7 @@ Migration `20260910073537_spam_safeguards.sql` + `src/lib/data.ts` +
 | Secret           | Used by                                  | Notes                          |
 |------------------|------------------------------------------|--------------------------------|
 | `GEMINI_API_KEY` | both Edge Functions                       | from Google AI Studio          |
-| `GEMINI_MODEL`   | both (optional)                          | default `gemini-2.5-flash`      |
+| `GEMINI_MODEL`   | both (optional)                          | default `gemini-3.6-flash`      |
 | `ALLOWED_ORIGIN` | both (`_shared/security.ts`)             | the Vercel site URL. Unset ⇒ only local dev (`localhost` / `127.0.0.1`, any port) is allowed. Set after the Vercel URL exists. |
 | `IP_HASH_SALT`   | both (`_shared/security.ts`)             | random 32-byte hex; salts the IP hash for `ai_calls`. Unset ⇒ a weak built-in fallback + a console warning. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | both (rate limit) | **auto-injected** by Supabase into deployed functions — do not set manually. |

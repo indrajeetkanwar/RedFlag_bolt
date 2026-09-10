@@ -60,12 +60,15 @@ export function genericError(cors: Cors, status = 502): Response {
 }
 
 const RETRIABLE_GEMINI_STATUS = new Set([429, 500, 502, 503, 504]);
+// Backoff before retries (ms). `gemini-3.6-flash` free tier returns frequent 503
+// "high demand" spikes; 4 attempts (~5.25s of waiting worst case) rides through most.
+const RETRY_BACKOFF_MS = [750, 1500, 3000];
 
 /**
  * POST to Gemini generateContent with retry on transient failures (429 rate limit,
- * 5xx overload — "model is experiencing high demand"). 3 attempts, ~0.5s then ~1.5s
- * backoff. The real upstream status/body is logged server-side; on final failure a
- * plain Error is thrown so the caller returns a generic message to the client.
+ * 5xx overload — "model is experiencing high demand"). The real upstream status/body
+ * is logged server-side; on final failure a plain Error is thrown so the caller
+ * returns a generic message to the client.
  */
 export async function callGeminiGenerate(
   model: string,
@@ -77,9 +80,9 @@ export async function callGeminiGenerate(
   const payload = JSON.stringify(body);
   let lastStatus = 0;
 
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt <= RETRY_BACKOFF_MS.length; attempt++) {
     if (attempt > 0) {
-      await new Promise((r) => setTimeout(r, attempt === 1 ? 500 : 1500));
+      await new Promise((r) => setTimeout(r, RETRY_BACKOFF_MS[attempt - 1]));
     }
 
     let res: Response;

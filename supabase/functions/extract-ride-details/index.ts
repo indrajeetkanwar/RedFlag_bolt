@@ -31,7 +31,7 @@ import {
 } from '../_shared/security.ts';
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') ?? '';
-const GEMINI_MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-2.5-flash';
+const GEMINI_MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.6-flash';
 
 // 4 MB image ≈ 5.6M base64 chars (4 * 1024 * 1024 * 4 / 3).
 const MAX_BASE64_CHARS = 5_600_000;

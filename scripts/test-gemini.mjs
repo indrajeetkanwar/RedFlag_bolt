@@ -4,7 +4,7 @@
  * without deploying anything.
  *
  *   GEMINI_API_KEY=xxx node scripts/test-gemini.mjs path/to/screenshot.png
- *   GEMINI_API_KEY=xxx GEMINI_MODEL=gemini-2.5-flash node scripts/test-gemini.mjs shot.jpg
+ *   GEMINI_API_KEY=xxx GEMINI_MODEL=gemini-3.6-flash node scripts/test-gemini.mjs shot.jpg
  *
  * With no path it uses scripts/fixtures/ride.png (a 1x1 pixel — expect nulls / low
  * confidence, which still proves the request + mapping + gate path works).
@@ -19,7 +19,7 @@ import * as esbuild from 'esbuild';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const KEY = process.env.GEMINI_API_KEY;
-const MODEL = process.env.GEMINI_MODEL ?? 'gemini-2.5-flash';
+const MODEL = process.env.GEMINI_MODEL ?? 'gemini-3.6-flash';
 const CONFIDENCE_THRESHOLD = 0.8; // mirrors src/lib/ai/index.ts
 
 if (!KEY) {
