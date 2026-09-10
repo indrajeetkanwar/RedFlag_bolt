@@ -152,6 +152,8 @@ button:focus-visible, input:focus-visible, textarea:focus-visible { outline: 3px
 .form-card { margin-top: 11px; padding: 16px; }
 .form-card label small { color: #96939a; font-size: 10px; font-weight: 500; }
 .form-card > small { display: block; margin-top: 8px; color: #96939a; font-size: 10px; line-height: 1.4; }
+.ai-hint { display: flex; align-items: center; gap: 5px; margin-top: 9px; color: #3525cd; font-size: 11px; line-height: 1.4; }
+.form-card .text-action:disabled { opacity: .55; }
 .choice-row { display: flex; flex-wrap: wrap; gap: 7px; }
 .choice-row button { padding: 9px 12px; border: 1px solid #e4e2df; border-radius: 9px; color: #5f5e61; background: #f7f5f2; font-size: 12px; }
 .choice-row button:first-child, .choice-row button.platform-chosen { color: #3525cd; border-color: #c9c5ff; background: #eeeaff; }

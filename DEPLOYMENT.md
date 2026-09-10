@@ -29,9 +29,11 @@ Both files in `supabase/migrations/`, **in order**. Either method:
 **SQL Editor (simplest):** Supabase dashboard → SQL Editor → paste each file's contents
 → Run.
 
-1. `20260910053117_create_spotrealredflag_schema.sql` (already applied on this project —
-   re-running is safe, it's idempotent)
-2. `20260910073537_spam_safeguards.sql` ← **new, must be run**
+1. `20260910053117_create_spotrealredflag_schema.sql` (idempotent, re-run safe)
+2. `20260910073537_spam_safeguards.sql` (spam safeguards)
+3. `20260910082139_report_ai_classification.sql` ← **new for Phase 4** — adds
+   `reports.ai_*` metadata columns. Additive/nullable; the app degrades gracefully
+   without it (classification just isn't stored).
 
 **or CLI:**
 
@@ -49,7 +51,11 @@ Optional test data: run `supabase/seed.sql` (green/amber/red sample vehicles).
 
 ---
 
-## 2. Deploy the Gemini Edge Function
+## 2. Deploy the Gemini Edge Functions
+
+Two functions, both public, both using the same secrets:
+`extract-ride-details` (Phase 3 — screenshot → plate) and `classify-report`
+(Phase 4 — report text → categories).
 
 ```bash
 # one-time, if not done in step 1
@@ -60,26 +66,32 @@ npx supabase link --project-ref yojnyfsatgevqbdjmmqm
 npx supabase secrets set GEMINI_API_KEY=your-gemini-key
 npx supabase secrets set GEMINI_MODEL=gemini-2.0-flash        # optional, this is the default
 
-# deploy (public — no auth, per PROJECT_CONTEXT.md §4)
+# deploy both (public — no auth, per PROJECT_CONTEXT.md §4)
 npx supabase functions deploy extract-ride-details --no-verify-jwt
+npx supabase functions deploy classify-report --no-verify-jwt
 ```
 
-`supabase/config.toml` already sets `verify_jwt = false` for this function, so future
-deploys keep it public even without the flag.
+`supabase/config.toml` already sets `verify_jwt = false` for both, so future deploys
+keep them public even without the flag.
 
-Verify it's up:
+Verify they're up:
 
 ```bash
-curl -i -X POST \
+# extraction — expect HTTP 502 {"error":"Gemini API 400: ...invalid image..."}
+curl -s -X POST \
   "https://yojnyfsatgevqbdjmmqm.supabase.co/functions/v1/extract-ride-details" \
-  -H "apikey: <your VITE_SUPABASE_ANON_KEY>" \
-  -H "Content-Type: application/json" \
+  -H "apikey: <your VITE_SUPABASE_ANON_KEY>" -H "Content-Type: application/json" \
   -d '{"imageBase64":"aGk=","mimeType":"image/png"}'
+
+# classification — expect HTTP 200 with categories / severity / confidence
+curl -s -X POST \
+  "https://yojnyfsatgevqbdjmmqm.supabase.co/functions/v1/classify-report" \
+  -H "apikey: <your VITE_SUPABASE_ANON_KEY>" -H "Content-Type: application/json" \
+  -d '{"description":"The driver kept shouting and was overtaking dangerously the whole ride."}'
 ```
 
-Expect HTTP 502 with `{"error":"Gemini API 400: ...invalid image..."}` — that proves
-the function runs and is reaching Gemini with the key. A `500` `"GEMINI_API_KEY is not
-configured"` means the secret didn't take.
+Both proving the function runs and reaches Gemini with the key. A `500`
+`"GEMINI_API_KEY is not configured"` means the secret didn't take.
 
 ---
 
@@ -146,16 +158,23 @@ GEMINI_MODEL    = gemini-2.0-flash        (optional)
 2. **Deployed function directly:** the `curl` in step 2, but with a real base64 image
    (`base64 -w0 shot.png`). Expect a 200 with `vehicleNumber` + `confidence`.
 
-3. **Full app (Vercel or local with `VITE_AI_PROVIDER=gemini`):**
+3. **Classification (Phase 4), no deploy needed:** the second `curl` in step 2. Or in
+   the app, on the report form: type a description → **"Suggest categories from this"**
+   → relevant checkboxes get pre-ticked (you can still toggle them).
+
+4. **Full app (Vercel or local with `VITE_AI_PROVIDER=gemini`):**
    - Upload a clear ride screenshot → Analyzing → correct green/amber/red for that plate.
    - Upload a blurry / cropped screenshot → **"We couldn't clearly read the vehicle
      number"** screen, no result. (This is the §12 gate — must never show a guessed plate.)
    - Check the `searches` table in Supabase for a new row per check.
+   - Submit a report → row in `reports` has `ai_categories` / `ai_severity` /
+     `ai_confidence` populated (once migration 3 is applied).
    - Submit a report with a phone number in the text → rejected with a message.
    - Submit 4 reports quickly → the 4th is rate-limited.
 
-4. `npm run test:lib` — offline unit tests for the content rules and the Gemini
-   response mapping. `npm run screenshot` — drives the mock flow in real Chrome.
+5. `npm run test:lib` — offline unit tests (content rules + Gemini extraction &
+   classification mapping). `npm run screenshot` — drives the mock flow, including the
+   "Suggest categories" assist, in real Chrome.
 
 ---
 
@@ -163,8 +182,10 @@ GEMINI_MODEL    = gemini-2.0-flash        (optional)
 
 - **Frontend:** set `VITE_AI_PROVIDER=mock` in Vercel and redeploy — instantly back to
   the mock provider, no other changes. Or redeploy a previous Vercel deployment.
-- **Edge Function:** `npx supabase functions delete extract-ride-details` (the frontend
-  then returns the `error` outcome → "couldn't read" screen).
-- **DB:** migration 2 only *adds* columns / constraints / indexes. To undo:
-  `ALTER TABLE reports DROP CONSTRAINT reports_description_min_length, DROP CONSTRAINT
-  reports_description_no_contact;` (columns can stay — they're nullable and harmless).
+- **Edge Functions:** `npx supabase functions delete extract-ride-details` /
+  `classify-report`. Extraction then returns the `error` outcome → "couldn't read"
+  screen; classification silently returns `null` (no suggestion, report still submits).
+- **DB:** migrations 2 and 3 only *add* columns / constraints / indexes. To undo
+  content rules: `ALTER TABLE reports DROP CONSTRAINT reports_description_min_length,
+  DROP CONSTRAINT reports_description_no_contact;`. Columns can stay — nullable and
+  harmless.

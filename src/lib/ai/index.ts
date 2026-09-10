@@ -1,12 +1,14 @@
 import { mockProvider } from './mockProvider';
 import { geminiProvider } from './geminiProvider';
-import type { AIProvider, ExtractionOutcome } from './types';
+import { REPORT_CATEGORIES, REPORT_SEVERITIES } from '../categories';
+import type { AIProvider, ExtractionOutcome, ReportClassification } from './types';
 
 export type {
   AIProvider,
   ExtractedRideDetails,
   ExtractionOutcome,
   FieldConfidence,
+  ReportClassification,
   ScreenshotInput,
 } from './types';
 
@@ -68,4 +70,32 @@ export async function extractRideDetails(file: File): Promise<ExtractionOutcome>
   }
 
   return { status: 'success', vehicleNumber: details.vehicleNumber as string, details };
+}
+
+/**
+ * Categorise a report's free text (Phase 4). Best-effort and non-blocking: on any
+ * failure it returns `null` and the report proceeds with the user's own category
+ * selection. The result is sanitised to the fixed taxonomy so a misbehaving model
+ * can't introduce unknown categories.
+ */
+export async function classifyReport(description: string): Promise<ReportClassification | null> {
+  const text = description.trim();
+  if (text.length < 12) return null;
+
+  try {
+    const raw = await getAIProvider().classifyReport({ description: text });
+    const categories = [
+      ...new Set(
+        (raw.categories ?? []).filter((c) => (REPORT_CATEGORIES as readonly string[]).includes(c))
+      ),
+    ];
+    return {
+      categories: categories.length > 0 ? categories : ['Other'],
+      severity: REPORT_SEVERITIES.includes(raw.severity) ? raw.severity : 'low',
+      confidence: Math.min(1, Math.max(0, Number(raw.confidence) || 0)),
+      personalInfoLikely: Boolean(raw.personalInfoLikely),
+    };
+  } catch {
+    return null;
+  }
 }

@@ -80,6 +80,20 @@ async function main() {
   await snap('result-amber');
   if (!kindAmber.includes('caution')) errors.push(`expected caution result, got "${kindAmber}"`);
 
+  // 6. Report form -> AI "Suggest categories" pre-selects checkboxes (Phase 4)
+  await page.click('.bottom-nav button:has-text("Report")');
+  await page.waitForSelector('.report-form');
+  await page.fill(
+    '#description',
+    'The driver kept staring at me in the mirror and followed my auto for a while after dropping me.'
+  );
+  await page.click('button:has-text("Suggest categories from this")');
+  await page.waitForSelector('.category-grid button.chosen', { timeout: 15000 });
+  const chosen = await page.$$eval('.category-grid button.chosen', (els) => els.map((e) => e.textContent?.trim()));
+  console.log('AI-suggested categories:', chosen);
+  await snap('report-ai-suggest');
+  if (chosen.length === 0) errors.push('expected AI to pre-select at least one category');
+
   await browser.close();
 }
 

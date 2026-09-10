@@ -2,6 +2,8 @@ import { supabase } from './supabase';
 import { normalizeRegistration } from './normalize';
 import { getClientKey } from './clientKey';
 import { validateDescription } from './reportValidation';
+import { classifyReport } from './ai';
+import type { ReportClassification } from './ai';
 import type { Vehicle, Report, ResultKind, VehicleCheckResult, CommunityReportView } from './types';
 
 /** Lightweight rate limit: reports allowed per browser (client_key) per window. */
@@ -91,6 +93,9 @@ export async function submitReport(params: {
   categories: string[];
   description: string;
   rideDate: string;
+  /** Pre-computed classification (from the "Suggest categories" button) to avoid a
+   *  second AI call. If omitted, submitReport classifies best-effort itself. */
+  classification?: ReportClassification | null;
 }): Promise<{ success: boolean; error?: string }> {
   // 1. Content rules (privacy + minimum usefulness). Mirrored server-side as CHECK
   //    constraints — this is just the friendly message.
@@ -102,6 +107,13 @@ export async function submitReport(params: {
   const clientKey = getClientKey();
   const normalized = normalizeRegistration(params.registrationNumber);
   const description = params.description.trim();
+
+  // AI categorisation — metadata only (PROJECT_CONTEXT.md §11). Best-effort: a null
+  // result (provider off / failed) just means no ai_* columns are stored.
+  const classification =
+    params.classification !== undefined
+      ? params.classification
+      : await classifyReport(description);
 
   // 2. Rate limit per browser.
   const { count: recentCount } = await supabase
@@ -158,14 +170,32 @@ export async function submitReport(params: {
     }
   }
 
-  const { error: reportError } = await supabase.from('reports').insert({
+  const baseRow = {
     vehicle_id: vehicleId,
     platform: params.platform,
     categories: params.categories,
     description,
     ride_date: params.rideDate || null,
     client_key: clientKey,
-  });
+  };
+
+  const rowWithAi = classification
+    ? {
+        ...baseRow,
+        ai_categories: classification.categories,
+        ai_severity: classification.severity,
+        ai_confidence: classification.confidence,
+        ai_personal_info_flag: classification.personalInfoLikely,
+      }
+    : baseRow;
+
+  let { error: reportError } = await supabase.from('reports').insert(rowWithAi);
+
+  // Graceful degradation: if migration 3 (ai_* columns) isn't applied yet, retry
+  // without them so report submission still works.
+  if (reportError && /column .*ai_/.test(reportError.message) && rowWithAi !== baseRow) {
+    ({ error: reportError } = await supabase.from('reports').insert(baseRow));
+  }
 
   if (reportError) {
     // The server CHECK constraints can still reject content the client regex missed.

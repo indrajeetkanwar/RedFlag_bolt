@@ -150,12 +150,18 @@ columns; there is no generated Supabase types file yet.
 Per `PROJECT_CONTEXT.md` §11, §13, §32: AI returns **structured** data; the app makes
 the deterministic decisions; providers are swappable behind one interface.
 
+`AIProvider` has two methods: `extractRideDetails` (Phase 3) and `classifyReport`
+(Phase 4). `moderateContent` (§32) is still not on the interface.
+
 | File                | Contents                                                                 |
 |---------------------|------------------------------------------------------------------------|
-| `types.ts`          | `AIProvider` interface, `ExtractedRideDetails` (all fields nullable + per-field `confidence` 0..1), `ScreenshotInput`, `ExtractionOutcome` (`success` \| `low_confidence` \| `error`). |
-| `mockProvider.ts`   | `mockProvider: AIProvider` — **no SDK, no network**. Returns canned structured data after a ~1.2 s delay, keyed off the picked file's **name** (table below). Used for local dev (`VITE_AI_PROVIDER=mock`, the default). |
-| `geminiProvider.ts` | `geminiProvider: AIProvider` — `File` → base64 → `POST` to the `extract-ride-details` Supabase Edge Function (which holds the Gemini key). No secret in this file or the bundle. Active when `VITE_AI_PROVIDER=gemini`. |
-| `index.ts`          | `getAIProvider()` (reads `VITE_AI_PROVIDER`, default `"mock"`), `extractRideDetails(file)` (calls the provider, then applies the confidence gate), `VEHICLE_NUMBER_CONFIDENCE_THRESHOLD = 0.8`. |
+| `types.ts`          | `AIProvider`, `ExtractedRideDetails` (nullable fields + per-field `confidence`), `ExtractionOutcome`, `ReportTextInput`, `ReportClassification` (`categories[]`, `severity`, `confidence`, `personalInfoLikely`). |
+| `mockProvider.ts`   | `mockProvider: AIProvider` — **no SDK, no network**. `extractRideDetails` keyed off the picked file's **name** (table below); `classifyReport` keyword-matches the description. Local dev default (`VITE_AI_PROVIDER=mock`). |
+| `geminiProvider.ts` | `geminiProvider: AIProvider` — `POST`s to the Edge Functions (`extract-ride-details`, `classify-report`) which hold the Gemini key. No secret in this file or the bundle. Active when `VITE_AI_PROVIDER=gemini`. |
+| `index.ts`          | `getAIProvider()` (reads `VITE_AI_PROVIDER`), `extractRideDetails(file)` (provider + confidence gate), `classifyReport(description)` (provider + sanitise to the fixed taxonomy; returns `null` on any failure), `VEHICLE_NUMBER_CONFIDENCE_THRESHOLD = 0.8`. |
+
+Category taxonomy: `src/lib/categories.ts` (`REPORT_CATEGORIES`) — the single source of
+truth, used by the form, the mock, and passed to Gemini.
 
 **Confidence gate** (`extractRideDetails` in `index.ts` — provider-agnostic, unchanged
 by Gemini): the outcome is `success` only if `vehicleNumber` is non-empty **and**
@@ -201,8 +207,26 @@ browser ◀──── ExtractedRideDetails JSON ──────────
 - The screenshot is never stored — it exists only for the request (`§18`).
 - Deploy + secrets: see `DEPLOYMENT.md`.
 
-**Not implemented yet:** `classifyReport` (Phase 4) and `moderateContent` (Phase 5)
-are named in `PROJECT_CONTEXT.md` §32 but not on the `AIProvider` interface yet.
+### Report classification (Phase 4)
+
+- `classifyReport(description)` (browser) → `classifyReport` on the provider. Gemini
+  path: `POST` to the **`classify-report`** Edge Function (`index.ts` + pure
+  `classify.ts`, same GEMINI_* secrets). Structured output via `responseSchema` with
+  the category list as an `enum`.
+- **Assist, not authority** (`§11`, `§34`): the report form has a "Suggest categories
+  from this" button under the description. It pre-ticks the suggested checkboxes; the
+  user toggles freely. Copy makes no claims ("Ticked from what you wrote. You decide
+  what stays.").
+- On submit, `submitReport` (`src/lib/data.ts`) stores the classification as
+  **metadata** — `reports.ai_categories / ai_severity / ai_confidence /
+  ai_personal_info_flag` (migration 3). It reuses the "Suggest" result if the text is
+  unchanged, else classifies once, best-effort. A `null` result (provider off /
+  failed) just means no `ai_*` columns are written — and the insert falls back to the
+  base row if those columns don't exist yet.
+- **Not** an input to the Green/Amber/Red rule (`§10`) — that stays purely
+  `reportCount` / distinct `categories` in `checkVehicle`.
+
+**Not implemented yet:** `moderateContent` (`§32`, Phase 5).
 
 ---
 
@@ -214,13 +238,16 @@ top comment):
 1. `supabase/migrations/20260910053117_create_spotrealredflag_schema.sql` — core tables.
 2. `supabase/migrations/20260910073537_spam_safeguards.sql` — `client_key` columns +
    `reports` CHECK constraints + indexes (see §5a).
+3. `supabase/migrations/20260910082139_report_ai_classification.sql` — `reports.ai_*`
+   metadata columns (Phase 4). Additive/nullable; not release-blocking (the insert
+   degrades gracefully).
 
 Seed data for testing: `supabase/seed.sql`.
 
 | Table             | Purpose                                    | Key columns                                                                 |
 |-------------------|--------------------------------------------|---------------------------------------------------------------------------|
 | `vehicles`        | One row per distinct vehicle               | `registration_number` (raw), `normalized_registration_number` (**unique**) |
-| `reports`         | Community-submitted reports                | `vehicle_id` FK, `platform`, `categories text[]`, `description`, `ride_date`, `status` (default `'active'`), `client_key` |
+| `reports`         | Community-submitted reports                | `vehicle_id` FK, `platform`, `categories text[]`, `description`, `ride_date`, `status`, `client_key`, `ai_categories`, `ai_severity`, `ai_confidence`, `ai_personal_info_flag` |
 | `report_evidence` | Optional evidence files (schema only, unused by the app yet) | `report_id` FK, `storage_path`, `expires_at` (retention) |
 | `searches`        | Audit log of every check (analytics / abuse detection) | `vehicle_id` FK (nullable), `search_term` (raw), `platform`, `client_key` |
 
@@ -316,9 +343,9 @@ stack; migrations are applied via the SQL Editor or `npx supabase db push`.
 |---------------------------------------|------------------------------------------------------------|-------|
 | Supabase wired to real data           | **Done** — `src/lib/data.ts` is fully Supabase-backed       | 2     |
 | AI provider abstraction + upload flow  | **Done** — `src/lib/ai/` + `analyzeScreenshot`, `cantRead` low-confidence branch | 3 |
-| Real Gemini extraction                 | **Done (code)** — `geminiProvider` + `extract-ride-details` Edge Function; needs deploy + `GEMINI_API_KEY` secret + `VITE_AI_PROVIDER=gemini` (`DEPLOYMENT.md`) | 3 |
+| Real Gemini extraction + classification | **Done (code)** — `geminiProvider` + `extract-ride-details` & `classify-report` Edge Functions; needs deploy + `GEMINI_API_KEY` secret + `VITE_AI_PROVIDER=gemini` (`DEPLOYMENT.md`) | 3–4 |
 | Lightweight spam / abuse safeguards    | **Done** — see §5a. Full abuse system (scoring, bot detection) still later | 5 |
-| AI report categorisation              | Not started — categories are user-selected checkboxes       | 4     |
+| AI report categorisation              | **Done** — "Suggest categories" assist + `ai_*` metadata on `reports`. Assist only; user stays in control (§4a) | 4 |
 | Evidence upload UI + Storage + retention | Not started — `report_evidence` table exists, no UI, "Add screenshot" button is inert | 5–6 |
 | Informational pages (Safety/Privacy/Terms/How it works) | Placeholder buttons in `FooterLinks` / `Header`, no routes | 6 |
 | PWA polish (service worker, offline)  | `public/manifest.json` exists; no service worker registered | 6     |
@@ -358,15 +385,16 @@ mechanics and `PROJECT_CONTEXT.md` as the source of truth for product decisions.
 |---------------------|----------------------------------------------------------------------------|
 | `npm run typecheck` | `tsc --noEmit` over `src` (not `supabase/functions` — that's Deno).           |
 | `npm run lint`      | ESLint over `src` + `scripts` (`supabase/functions` is ignored).             |
-| `npm run test:lib`  | Offline unit tests: report content rules (`reportValidation.ts`) + Gemini response mapping (`extract-ride-details/gemini.ts`). Bundles the TS with esbuild, asserts, exits non-zero on failure. |
-| `npm run test:gemini` | `GEMINI_API_KEY=… npm run test:gemini -- path/to/shot.png` — live call to the real Gemini API with the function's exact prompt/schema; prints the mapped result + whether the gate passes. No deploy needed. |
+| `npm run test:lib`  | Offline unit tests: report content rules (`reportValidation.ts`), Gemini extraction mapping (`extract-ride-details/gemini.ts`), report-classification mapping (`classify-report/classify.ts`), and `mockProvider.classifyReport`. Bundles the TS with esbuild, asserts, exits non-zero on failure. |
+| `npm run test:gemini` | `GEMINI_API_KEY=… npm run test:gemini -- path/to/shot.png` — live call to the real Gemini API with the extraction function's exact prompt/schema; prints the mapped result + whether the gate passes. No deploy needed. |
 | `npm run screenshot`| Playwright (`channel: 'chrome'` — installed Chrome, no bundled browser) drives the running app at 390 px and screenshots each state into `./screenshots/` (git-ignored). Fails on any console/page error. |
 
 `npm run screenshot` prereq: `npm run dev` on `http://localhost:5173` (override with
 `APP_URL`). Path it walks: Home → upload `scripts/fixtures/ride.png` → red result →
 "Check another ride" → upload `scripts/fixtures/blur.png` → `cantRead` screen → "Enter
-vehicle number manually" → type `KA 03 CD 4567` → amber. Fixtures are 1×1 PNGs; the
-mock provider keys off their file names (§4a).
+vehicle number manually" → type `KA 03 CD 4567` → amber → Report tab → type a
+description → "Suggest categories from this" → checkboxes pre-ticked. Fixtures are 1×1
+PNGs; the mock provider keys off their file names (§4a).
 
 > Against a DB where migration 2 (`spam_safeguards`) isn't applied yet, `npm run
 > screenshot` reports two console `400`s (the `searches.client_key` insert) — expected

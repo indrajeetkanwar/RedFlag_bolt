@@ -56,6 +56,27 @@ export type ExtractionOutcome =
   | { status: 'low_confidence'; details: ExtractedRideDetails }
   | { status: 'error'; message: string };
 
+/** Free text of a report, for categorisation (Phase 4). */
+export interface ReportTextInput {
+  description: string;
+}
+
+/**
+ * Structured categorisation of a report's free text. AI is a *supporting* component
+ * here (PROJECT_CONTEXT.md §11): this is stored as metadata and used to pre-fill the
+ * category checkboxes — it never overrides the user's own selection and is not an
+ * input to the deterministic Green/Amber/Red logic (§10).
+ */
+export interface ReportClassification {
+  /** Zero or more values from REPORT_CATEGORIES (src/lib/categories.ts). */
+  categories: string[];
+  severity: 'low' | 'medium' | 'high';
+  /** Overall model confidence in this categorisation, 0..1. */
+  confidence: number;
+  /** Soft signal that the text may contain personal/contact info. Not a hard block. */
+  personalInfoLikely: boolean;
+}
+
 /**
  * A swappable AI backend. Implementations must be pure w.r.t. app state and must not
  * persist the screenshot anywhere.
@@ -67,4 +88,8 @@ export interface AIProvider {
    *  low-quality image — it returns low confidence instead. Throws only on real
    *  failures (which the caller turns into an `error` outcome). */
   extractRideDetails(input: ScreenshotInput): Promise<ExtractedRideDetails>;
+  /** Categorise a report's free text against the fixed taxonomy. Throws only on real
+   *  failures; the caller (classifyReport in index.ts) treats a failure as "no
+   *  suggestion" and never blocks the report. */
+  classifyReport(input: ReportTextInput): Promise<ReportClassification>;
 }

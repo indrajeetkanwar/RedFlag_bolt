@@ -1,4 +1,4 @@
-import { useEffect, useState, type ChangeEvent, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react';
 import {
   ArrowLeft,
   ArrowRight,
@@ -26,7 +26,8 @@ import {
   X,
 } from 'lucide-react';
 import { checkVehicle, getCommunityReports, submitReport } from '@/lib/data';
-import { extractRideDetails } from '@/lib/ai';
+import { extractRideDetails, classifyReport, type ReportClassification } from '@/lib/ai';
+import { REPORT_CATEGORIES } from '@/lib/categories';
 import type { CommunityReportView, ResultKind, VehicleCheckResult } from '@/lib/types';
 
 const logoUrl = '/logo.png';
@@ -35,7 +36,7 @@ type Screen = 'home' | 'check' | 'analyzing' | 'result' | 'reports' | 'report' |
 
 type CantReadInfo = { reason: 'low_confidence' | 'error'; message: string };
 
-const categories = ['Harassment / inappropriate behaviour', 'Unsafe driving', 'Threatening behaviour', 'Driver followed me', 'Driver contacted me after the ride', 'Verbal abuse', 'Route-related concern', 'Other'];
+const categories: readonly string[] = REPORT_CATEGORIES;
 
 function App() {
   const [screen, setScreen] = useState<Screen>('home');
@@ -43,6 +44,8 @@ function App() {
   const [vehicleNumber, setVehicleNumber] = useState('KA 01 AB 1234');
   const [cantRead, setCantRead] = useState<CantReadInfo | null>(null);
   const [selectedCategories, setSelectedCategories] = useState<string[]>([]);
+  const [aiSuggestion, setAiSuggestion] = useState<{ text: string; result: ReportClassification } | null>(null);
+  const [suggesting, setSuggesting] = useState(false);
   const [submitted, setSubmitted] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
@@ -89,6 +92,23 @@ function App() {
   const toggleCategory = (category: string): void => {
     setSelectedCategories((current) => current.includes(category) ? current.filter((item) => item !== category) : [...current, category]);
   };
+
+  // Phase 4 — AI category assist. Pre-selects suggested categories; the user stays in
+  // control and can toggle any of them. Never blocks; a null result just shows nothing.
+  const runSuggest = async (description: string): Promise<void> => {
+    setSuggesting(true);
+    try {
+      const result = await classifyReport(description);
+      if (result) {
+        setAiSuggestion({ text: description.trim(), result });
+        setSelectedCategories((current) => Array.from(new Set([...current, ...result.categories])));
+      } else {
+        setAiSuggestion(null);
+      }
+    } finally {
+      setSuggesting(false);
+    }
+  };
   const handleSubmit = async (event: FormEvent<HTMLFormElement>): Promise<void> => {
     event.preventDefault();
     setSubmitting(true);
@@ -99,15 +119,21 @@ function App() {
     const platform = String(formData.get('platform') ?? 'Other');
     const description = String(formData.get('description') ?? '');
     const rideDate = String(formData.get('ride_date') ?? '');
+    // Reuse the "Suggest" result if it matches the text being submitted, so we don't
+    // classify twice. `undefined` = let submitReport classify; `null`/value = use as-is.
+    const classification =
+      aiSuggestion && aiSuggestion.text === description.trim() ? aiSuggestion.result : undefined;
     const result = await submitReport({
       registrationNumber: regNumber,
       platform,
       categories: selectedCategories.length > 0 ? selectedCategories : ['Other'],
       description,
       rideDate,
+      classification,
     });
     setSubmitting(false);
     if (result.success) {
+      setAiSuggestion(null);
       setSubmitted(true);
     } else {
       setSubmitError(result.error ?? 'Something went wrong. Please try again.');
@@ -124,7 +150,7 @@ function App() {
         {screen === 'cantRead' && cantRead && <CantRead info={cantRead} onFile={handleFile} onManual={() => { setCantRead(null); setScreen('check'); }} />}
         {screen === 'result' && checkResult && <Result result={checkResult} vehicleNumber={vehicleNumber} onBack={openCheck} onReports={goToReports} onReport={() => setScreen('report')} />}
         {screen === 'reports' && checkResult && <CommunityReports vehicleNumber={vehicleNumber} setVehicleNumber={setVehicleNumber} onBack={() => setScreen('home')} onCheck={runManualCheck} onUpload={openCheck} result={checkResult} />}
-        {screen === 'report' && (submitted ? <Submitted onHome={() => { setSubmitted(false); setScreen('home'); }} /> : <ReportRide selectedCategories={selectedCategories} onToggle={toggleCategory} onSubmit={handleSubmit} onBack={() => setScreen('home')} submitting={submitting} submitError={submitError} />)}
+        {screen === 'report' && (submitted ? <Submitted onHome={() => { setSubmitted(false); setScreen('home'); }} /> : <ReportRide selectedCategories={selectedCategories} onToggle={toggleCategory} onSubmit={handleSubmit} onBack={() => setScreen('home')} submitting={submitting} submitError={submitError} onSuggest={runSuggest} suggesting={suggesting} suggestion={aiSuggestion?.result ?? null} />)}
       </main>
       <BottomNav screen={screen} onNavigate={setScreen} />
     </div>
@@ -233,9 +259,22 @@ function CommunityReports({ vehicleNumber, setVehicleNumber, onBack, onCheck, on
   return <><div className="section-heading compact"><div className="eyebrow"><BadgeCheck size={14} /> Community verified ride check</div><h1>Community reports</h1><p>Search a vehicle to see anonymous experiences shared by other women.</p></div><section className="search-card"><label htmlFor="report-search">Search a vehicle</label><div className="manual-input"><span>IND</span><input id="report-search" value={vehicleNumber} onChange={(event) => setVehicleNumber(event.target.value)} /><button aria-label="Clear vehicle number" onClick={() => setVehicleNumber('')}><X size={17} /></button></div><button className="primary-button" onClick={onCheck}><Shield size={17} /> Check vehicle</button><button className="text-action" onClick={onUpload}>Or upload a screenshot instead <ArrowRight size={15} /></button></section><section className="overview-card"><small>Vehicle overview</small><strong>{vehicleNumber} <span>· {result.vehicle ? 'In database' : 'Not yet recorded'}</span></strong><span className="report-count">{reportCount} community {reportCount === 1 ? 'report' : 'reports'}</span><div className="filter-row"><span className="selected">All Reports ({reportCount})</span></div></section>{loading ? <div className="disclaimer">Loading reports…</div> : communityReports && communityReports.length > 0 ? <div className="report-list">{communityReports.map((report) => <article className="community-report" key={report.id}><div className="report-meta"><span className="report-chip"><span className="tiny-dot" />{report.category}</span><small>{report.date}</small></div><blockquote>“{report.quote}”</blockquote><footer><span><LockKeyhole size={13} /> Anonymous report</span><span>{report.platform}</span></footer></article>)}</div> : <div className="disclaimer">No community reports found for this vehicle yet.</div>}<div className="disclaimer"><Info size={16} /> Reports are user-submitted experiences and have not been independently verified.</div><button className="back-link" onClick={onBack}><ArrowLeft size={15} /> Back to home</button></>;
 }
 
-function ReportRide({ selectedCategories, onToggle, onSubmit, onBack, submitting, submitError }: { selectedCategories: string[]; onToggle: (category: string) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onBack: () => void; submitting: boolean; submitError: string | null }) {
+function ReportRide({ selectedCategories, onToggle, onSubmit, onBack, submitting, submitError, onSuggest, suggesting, suggestion }: { selectedCategories: string[]; onToggle: (category: string) => void; onSubmit: (event: FormEvent<HTMLFormElement>) => void; onBack: () => void; submitting: boolean; submitError: string | null; onSuggest: (description: string) => void; suggesting: boolean; suggestion: ReportClassification | null }) {
   const [selectedPlatform, setSelectedPlatform] = useState<string>('Uber');
-  return <form className="report-form" onSubmit={onSubmit}><div className="section-heading compact"><div className="eyebrow"><MessageSquarePlus size={14} /> Anonymous solidarity</div><h1>Something happened?</h1><p>Tell us what went down. Your experience could help another woman make a more informed decision.</p></div><div className="zero-footprint"><ShieldCheck size={17} /><div><strong>Zero digital footprint</strong><span>Your identity is not displayed publicly. No login required.</span></div></div><section className="form-card"><label htmlFor="report-vehicle">Vehicle registration number <small>Required</small></label><div className="manual-input"><span>IND</span><input id="report-vehicle" name="vehicle" defaultValue="KA 01 AB 1234" required /></div><small>Format: KA 01 AB 1234 · Found on the vehicle plate or app receipt.</small></section><section className="form-card"><label>Ride platform</label><div className="choice-row"><input type="hidden" name="platform" value={selectedPlatform} />{['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'Other'].map((platform) => <button type="button" key={platform} className={selectedPlatform === platform ? 'platform-chosen' : ''} onClick={() => setSelectedPlatform(platform)}>{platform}</button>)}</div></section><section className="form-card"><label>What happened? <small>Select all that apply</small></label><div className="category-grid">{categories.map((category) => <button type="button" className={selectedCategories.includes(category) ? 'chosen' : ''} onClick={() => onToggle(category)} key={category}><span />{category}</button>)}</div></section><section className="form-card"><label htmlFor="description">Tell us what happened</label><textarea id="description" name="description" maxLength={600} required placeholder="Tell us what happened..." /><small>Please don't include unnecessary personal information about yourself or anyone else.</small></section><section className="form-card"><label htmlFor="ride-date">Ride date <small>Required</small></label><input className="date-input" id="ride-date" name="ride_date" type="date" required /></section><section className="evidence-card"><div><Paperclip size={18} /><strong>Optional evidence</strong></div><button type="button"><FileImage size={18} /> Add screenshot</button><small>Only upload evidence you are comfortable sharing.</small></section>{submitError && <div className="disclaimer" style={{ color: '#ba1a1a' }}>{submitError}</div>}<button className="primary-button submit-button" type="submit" disabled={submitting}>{submitting ? 'Submitting…' : <><LockKeyhole size={17} /> Submit report</>}</button><button type="button" className="back-link" onClick={onBack}>Cancel and go back</button></form>;
+  const [suggestHint, setSuggestHint] = useState<string | null>(null);
+  const descRef = useRef<HTMLTextAreaElement>(null);
+
+  const handleSuggest = (): void => {
+    const text = descRef.current?.value.trim() ?? '';
+    if (text.length < 12) {
+      setSuggestHint('Add a little more detail first, then tap again.');
+      return;
+    }
+    setSuggestHint(null);
+    onSuggest(text);
+  };
+
+  return <form className="report-form" onSubmit={onSubmit}><div className="section-heading compact"><div className="eyebrow"><MessageSquarePlus size={14} /> Anonymous solidarity</div><h1>Something happened?</h1><p>Tell us what went down. Your experience could help another woman make a more informed decision.</p></div><div className="zero-footprint"><ShieldCheck size={17} /><div><strong>Zero digital footprint</strong><span>Your identity is not displayed publicly. No login required.</span></div></div><section className="form-card"><label htmlFor="report-vehicle">Vehicle registration number <small>Required</small></label><div className="manual-input"><span>IND</span><input id="report-vehicle" name="vehicle" defaultValue="KA 01 AB 1234" required /></div><small>Format: KA 01 AB 1234 · Found on the vehicle plate or app receipt.</small></section><section className="form-card"><label>Ride platform</label><div className="choice-row"><input type="hidden" name="platform" value={selectedPlatform} />{['Uber', 'Ola', 'Rapido', 'Namma Yatri', 'Other'].map((platform) => <button type="button" key={platform} className={selectedPlatform === platform ? 'platform-chosen' : ''} onClick={() => setSelectedPlatform(platform)}>{platform}</button>)}</div></section><section className="form-card"><label htmlFor="description">Tell us what happened</label><textarea ref={descRef} id="description" name="description" maxLength={600} required placeholder="Tell us what happened..." /><small>Please don't include unnecessary personal information about yourself or anyone else.</small><button type="button" className="text-action" onClick={handleSuggest} disabled={suggesting}><Sparkles size={15} /> {suggesting ? 'Reading your description…' : 'Suggest categories from this'}</button>{suggestHint && <small className="ai-hint">{suggestHint}</small>}</section><section className="form-card"><label>What happened? <small>Select all that apply</small></label>{suggestion && <small className="ai-hint"><Sparkles size={12} /> Ticked from what you wrote{suggestion.severity === 'high' ? ' — reads as serious' : ''}. You decide what stays.</small>}<div className="category-grid">{categories.map((category) => <button type="button" className={selectedCategories.includes(category) ? 'chosen' : ''} onClick={() => onToggle(category)} key={category}><span />{category}</button>)}</div></section><section className="form-card"><label htmlFor="ride-date">Ride date <small>Required</small></label><input className="date-input" id="ride-date" name="ride_date" type="date" required /></section><section className="evidence-card"><div><Paperclip size={18} /><strong>Optional evidence</strong></div><button type="button"><FileImage size={18} /> Add screenshot</button><small>Only upload evidence you are comfortable sharing.</small></section>{submitError && <div className="disclaimer" style={{ color: '#ba1a1a' }}>{submitError}</div>}<button className="primary-button submit-button" type="submit" disabled={submitting}>{submitting ? 'Submitting…' : <><LockKeyhole size={17} /> Submit report</>}</button><button type="button" className="back-link" onClick={onBack}>Cancel and go back</button></form>;
 }
 
 function Submitted({ onHome }: { onHome: () => void }) {

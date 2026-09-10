@@ -64,6 +64,32 @@ eq('parseGeminiResponse extracts text part',
   g.parseGeminiResponse({ candidates: [{ content: { parts: [{ text: '{"vehicle_number":"KA05MN7788","confidence":{"vehicle_number":0.95}}' }] } }] }).vehicleNumber,
   'KA05MN7788');
 
+// --- report classification mapping (Phase 4) -----------------------------
+const c = await bundle('supabase/functions/classify-report/classify.ts');
+console.log('toReportClassification:');
+eq('keeps known categories, drops unknown, dedupes',
+  c.toReportClassification({ categories: ['Unsafe driving', 'Totally Made Up', 'Unsafe driving'], severity: 'medium', confidence: 0.7, personal_info_likely: false }).categories,
+  ['Unsafe driving']);
+eq('empty categories -> ["Other"]',
+  c.toReportClassification({ categories: [], severity: 'low', confidence: 0.2, personal_info_likely: false }).categories,
+  ['Other']);
+eq('bad severity -> low', c.toReportClassification({ categories: ['Other'], severity: 'catastrophic', confidence: 0.5, personal_info_likely: false }).severity, 'low');
+eq('confidence clamped', c.toReportClassification({ categories: ['Other'], severity: 'low', confidence: 9, personal_info_likely: false }).confidence, 1);
+eq('personal info flag coerced to boolean', c.toReportClassification({ categories: ['Other'], severity: 'low', confidence: 0.5, personal_info_likely: 1 }).personalInfoLikely, true);
+
+// --- mock provider classifyReport --------------------------------------
+const m = await bundle('src/lib/ai/mockProvider.ts');
+console.log('mockProvider.classifyReport:');
+eq('detects "followed" -> high severity',
+  (await m.mockProvider.classifyReport({ description: 'The driver followed me back towards my building after the ride ended.' })).categories.includes('Driver followed me'),
+  true);
+eq('rude/shouting -> Verbal abuse',
+  (await m.mockProvider.classifyReport({ description: 'He was extremely rude and started shouting when I asked him to slow down.' })).categories.includes('Verbal abuse'),
+  true);
+eq('bland text -> Other',
+  (await m.mockProvider.classifyReport({ description: 'The ride was mostly fine but the seats were uncomfortable and it was slow.' })).categories,
+  ['Other']);
+
 rmSync(work, { recursive: true, force: true });
 if (failures) { console.error(`\n${failures} failure(s)`); process.exit(1); }
 console.log('\nAll pure-logic tests passed.');

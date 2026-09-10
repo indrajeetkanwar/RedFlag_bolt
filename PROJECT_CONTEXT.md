@@ -1173,29 +1173,36 @@ as originally specified in Section 21. Migrating to Next.js is planned for later
 Phase 2 is done: src/lib/data.ts is wired to a live Supabase project (schema migration
 1 applied, seed data loaded).
 
-Phase 3 is code-complete:
+Phases 3 and 4 are code-complete:
 - src/lib/ai/ has the swappable provider abstraction, a mock provider, and a real
-  gemini provider that calls the extract-ride-details Supabase Edge Function
-  (supabase/functions/) so the Gemini key stays server-side.
-- The screenshot upload flow is wired end to end, with the confidence gate: an
-  unreadable / low-confidence plate shows the "couldn't read" screen and never runs a
-  DB lookup (§12).
+  gemini provider that calls two Supabase Edge Functions (extract-ride-details,
+  classify-report) so the Gemini key stays server-side.
+- Screenshot upload is wired end to end with the confidence gate: an unreadable /
+  low-confidence plate shows the "couldn't read" screen and never runs a DB lookup (§12).
+- Report categorisation (Phase 4): a "Suggest categories from this" button on the
+  report form pre-ticks AI-suggested categories (the user stays in control), and the
+  classification is stored as ai_* metadata on reports (migration 3). It is NOT an
+  input to the Green/Amber/Red rule.
 
-Lightweight spam safeguards are in place (migration 2): min description length, no
-phone/email in report text (JS + DB CHECK), per-browser report rate limiting and
-duplicate detection via an anonymous localStorage client_key (NOT auth).
+Lightweight spam safeguards (migration 2): min description length, no phone/email in
+report text (JS + DB CHECK), per-browser report rate limiting and duplicate detection
+via an anonymous localStorage client_key (NOT auth).
 
 Green/Amber/Red classification remains deterministic app code in checkVehicle (§10).
 
+Migrations 1 and 2 are applied to the live project. The Gemini Edge Functions and
+migration 3 are not deployed yet, and the frontend is not on Vercel yet.
+
 Current objective:
 
-Go live — run migration 2, deploy the Edge Function with the GEMINI_API_KEY secret,
-set VITE_AI_PROVIDER=gemini, deploy the frontend to Vercel. Full runbook + exact env
-vars / secrets in DEPLOYMENT.md.
+Go live — deploy the two Edge Functions with the GEMINI_API_KEY secret, run migration
+3, set VITE_AI_PROVIDER=gemini, deploy the frontend to Vercel. Full runbook + exact
+env vars / secrets in DEPLOYMENT.md.
 
 After that:
 
-Phase 4 — AI report categorisation.
+Phase 5 — automated abuse/spam protection (beyond the lightweight safeguards already
+in place).
 
 Do not skip directly to complex production architecture.
 

@@ -1,4 +1,10 @@
-import type { AIProvider, ExtractedRideDetails, ScreenshotInput } from './types';
+import type {
+  AIProvider,
+  ExtractedRideDetails,
+  ReportClassification,
+  ReportTextInput,
+  ScreenshotInput,
+} from './types';
 
 /**
  * Mock AI provider — no SDK, no network, no external API.
@@ -99,6 +105,52 @@ export const mockProvider: AIProvider = {
         vehicleModel: c.vehicleModel ? 0.8 : 0.2,
         vehicleColor: c.vehicleColor ? 0.8 : 0.2,
       },
+    };
+  },
+
+  // Keyword-based categorisation so the Phase 4 flow is testable offline. Real
+  // categorisation is the gemini provider via the classify-report Edge Function.
+  async classifyReport({ description }: ReportTextInput): Promise<ReportClassification> {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+
+    const text = description.toLowerCase();
+    const has = (...needles: string[]) => needles.some((n) => text.includes(n));
+
+    const categories: string[] = [];
+    if (has('touch', 'grope', 'stare', 'comment', 'number', 'personal', 'inappropriate')) {
+      categories.push('Harassment / inappropriate behaviour');
+    }
+    if (has('fast', 'rash', 'speed', 'brake', 'drunk', 'phone while', 'signal')) {
+      categories.push('Unsafe driving');
+    }
+    if (has('threat', 'threaten', 'scared', 'afraid', 'weapon', 'intimidat')) {
+      categories.push('Threatening behaviour');
+    }
+    if (has('follow', 'followed', 'trailing', 'behind me')) categories.push('Driver followed me');
+    if (has('called', 'messaged', 'texted', 'whatsapp', 'contacted me after', 'next day')) {
+      categories.push('Driver contacted me after the ride');
+    }
+    if (has('shout', 'yell', 'abuse', 'swore', 'curse', 'rude', 'verbal')) {
+      categories.push('Verbal abuse');
+    }
+    if (has('route', 'detour', 'longer way', 'wrong way', 'off route', 'diverted')) {
+      categories.push('Route-related concern');
+    }
+    if (categories.length === 0) categories.push('Other');
+
+    const severity: ReportClassification['severity'] = has(
+      'threat', 'weapon', 'follow', 'scared', 'grope', 'touch'
+    )
+      ? 'high'
+      : categories.some((c) => c !== 'Other' && c !== 'Route-related concern')
+        ? 'medium'
+        : 'low';
+
+    return {
+      categories,
+      severity,
+      confidence: categories[0] === 'Other' ? 0.4 : 0.82,
+      personalInfoLikely: /\d{6,}|@|\bphone\b|\bnumber\b/.test(text),
     };
   },
 };
