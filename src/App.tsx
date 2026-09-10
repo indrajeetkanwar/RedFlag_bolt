@@ -32,6 +32,14 @@ import type { CommunityReportView, ResultKind, VehicleCheckResult } from '@/lib/
 
 const logoUrl = '/logo.png';
 
+/** The five-petal flower logo (public/logo.png). Hides itself if the asset is missing
+ *  so we never render a broken-image glyph — the wrapper circle stays as a clean placeholder. */
+function Logo({ alt = 'SpotRealRedFlag flower logo' }: { alt?: string }) {
+  const [ok, setOk] = useState(true);
+  if (!ok) return null;
+  return <img src={logoUrl} alt={alt} onError={() => setOk(false)} />;
+}
+
 type Screen = 'home' | 'check' | 'analyzing' | 'result' | 'reports' | 'report' | 'cantRead';
 
 type CantReadInfo = { reason: 'low_confidence' | 'error'; message: string };
@@ -163,7 +171,7 @@ function Header({ screen, onNavigate }: HeaderProps) {
   return (
     <header className="topbar">
       <div className="topbar-inner">
-        {backEnabled ? <button className="icon-button" aria-label="Go back" onClick={() => onNavigate('home')}><ArrowLeft size={21} /></button> : <div className="brand-mark"><img src={logoUrl} alt="SpotRealRedFlag flower logo" /></div>}
+        {backEnabled ? <button className="icon-button" aria-label="Go back" onClick={() => onNavigate('home')}><ArrowLeft size={21} /></button> : <div className="brand-mark"><Logo /></div>}
         <button className="brand-lockup" onClick={() => onNavigate('home')}>
           <strong>SpotRealRedFlag</strong>
           <span>{screen === 'home' ? "Women's ride safety radar" : screen === 'reports' ? 'Community reports' : 'Check ride'}</span>
@@ -209,7 +217,7 @@ function CheckRide({ onBack, onFile, onManual, vehicleNumber, setVehicleNumber }
 }
 
 function Analyzing() {
-  return <section className="center-state"><div className="scan-orb"><img src={logoUrl} alt="SpotRealRedFlag" /></div><h1>Checking your ride…</h1><p>Reading the vehicle details and checking community reports.</p><div className="progress-list"><div><Check size={17} /> Identifying vehicle</div><div className="active"><Gauge size={17} /> Checking community reports</div><div className="faded"><span className="empty-circle" /> Almost there</div></div></section>;
+  return <section className="center-state"><div className="scan-orb"><Logo alt="SpotRealRedFlag" /></div><h1>Checking your ride…</h1><p>Reading the vehicle details and checking community reports.</p><div className="progress-list"><div><Check size={17} /> Identifying vehicle</div><div className="active"><Gauge size={17} /> Checking community reports</div><div className="faded"><span className="empty-circle" /> Almost there</div></div></section>;
 }
 
 function CantRead({ info, onFile, onManual }: { info: CantReadInfo; onFile: (event: ChangeEvent<HTMLInputElement>) => void; onManual: () => void }) {
