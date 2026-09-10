@@ -1170,19 +1170,32 @@ a Ride, per the Stitch design.
 It is built with Vite + React + TypeScript + Tailwind (bolt.new export), NOT Next.js
 as originally specified in Section 21. Migrating to Next.js is planned for later.
 
-Phase 2 is in progress: the data layer (src/lib/data.ts) is already wired to Supabase
-(vehicles / reports / searches). What remains is pointing it at a real Supabase project
-via .env (VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY) and applying the schema in
-supabase/migrations/. See ARCHITECTURE.md for the full setup steps.
+Phase 2 is done: src/lib/data.ts is wired to a live Supabase project (schema migration
+1 applied, seed data loaded).
+
+Phase 3 is code-complete:
+- src/lib/ai/ has the swappable provider abstraction, a mock provider, and a real
+  gemini provider that calls the extract-ride-details Supabase Edge Function
+  (supabase/functions/) so the Gemini key stays server-side.
+- The screenshot upload flow is wired end to end, with the confidence gate: an
+  unreadable / low-confidence plate shows the "couldn't read" screen and never runs a
+  DB lookup (§12).
+
+Lightweight spam safeguards are in place (migration 2): min description length, no
+phone/email in report text (JS + DB CHECK), per-browser report rate limiting and
+duplicate detection via an anonymous localStorage client_key (NOT auth).
+
+Green/Amber/Red classification remains deterministic app code in checkVehicle (§10).
 
 Current objective:
 
-Finish connecting Supabase so real vehicle/report data replaces any placeholder data
-(Phase 2).
+Go live — run migration 2, deploy the Edge Function with the GEMINI_API_KEY secret,
+set VITE_AI_PROVIDER=gemini, deploy the frontend to Vercel. Full runbook + exact env
+vars / secrets in DEPLOYMENT.md.
 
 After that:
 
-Connect Gemini for screenshot extraction (Phase 3).
+Phase 4 — AI report categorisation.
 
 Do not skip directly to complex production architecture.
 

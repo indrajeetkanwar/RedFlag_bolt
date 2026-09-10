@@ -12,6 +12,10 @@ dist-ssr
 *.local
 screenshots
 
+# Supabase CLI local state
+supabase/.temp
+supabase/.branches
+
 .vscode/*
 !.vscode/extensions.json
 .idea

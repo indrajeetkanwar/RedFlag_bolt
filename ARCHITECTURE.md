@@ -150,19 +150,20 @@ columns; there is no generated Supabase types file yet.
 Per `PROJECT_CONTEXT.md` §11, §13, §32: AI returns **structured** data; the app makes
 the deterministic decisions; providers are swappable behind one interface.
 
-| File              | Contents                                                                 |
-|-------------------|------------------------------------------------------------------------|
-| `types.ts`        | `AIProvider` interface, `ExtractedRideDetails` (all fields nullable + per-field `confidence` 0..1), `ScreenshotInput`, `ExtractionOutcome` (`success` \| `low_confidence` \| `error`). |
-| `mockProvider.ts` | `mockProvider: AIProvider` — **no SDK, no network**. Returns canned structured data after a ~1.2 s delay. Which case it returns is driven by the picked file's **name** (see table below). |
-| `index.ts`        | `getAIProvider()` (reads `VITE_AI_PROVIDER`, default `"mock"`), `extractRideDetails(file)` (calls the provider, then applies the confidence gate), `VEHICLE_NUMBER_CONFIDENCE_THRESHOLD = 0.8`. |
+| File                | Contents                                                                 |
+|---------------------|------------------------------------------------------------------------|
+| `types.ts`          | `AIProvider` interface, `ExtractedRideDetails` (all fields nullable + per-field `confidence` 0..1), `ScreenshotInput`, `ExtractionOutcome` (`success` \| `low_confidence` \| `error`). |
+| `mockProvider.ts`   | `mockProvider: AIProvider` — **no SDK, no network**. Returns canned structured data after a ~1.2 s delay, keyed off the picked file's **name** (table below). Used for local dev (`VITE_AI_PROVIDER=mock`, the default). |
+| `geminiProvider.ts` | `geminiProvider: AIProvider` — `File` → base64 → `POST` to the `extract-ride-details` Supabase Edge Function (which holds the Gemini key). No secret in this file or the bundle. Active when `VITE_AI_PROVIDER=gemini`. |
+| `index.ts`          | `getAIProvider()` (reads `VITE_AI_PROVIDER`, default `"mock"`), `extractRideDetails(file)` (calls the provider, then applies the confidence gate), `VEHICLE_NUMBER_CONFIDENCE_THRESHOLD = 0.8`. |
 
-**Confidence gate** (`extractRideDetails` in `index.ts`): the outcome is `success` only
-if `vehicleNumber` is non-empty **and** `confidence.vehicleNumber >= 0.8`. Otherwise
-`low_confidence`. A thrown provider error becomes `error`. The mock never returns a
-guessed number — low-confidence cases return `vehicleNumber: null`
-(`PROJECT_CONTEXT.md` §12).
+**Confidence gate** (`extractRideDetails` in `index.ts` — provider-agnostic, unchanged
+by Gemini): the outcome is `success` only if `vehicleNumber` is non-empty **and**
+`confidence.vehicleNumber >= 0.8`. Otherwise `low_confidence`. A thrown provider error
+becomes `error`. Both branches route the UI to the `cantRead` screen and **never** run
+a DB lookup (`PROJECT_CONTEXT.md` §12, §14).
 
-**Mock file-name triggers** (for manual testing):
+**Mock file-name triggers** (for local testing):
 
 | File name contains                        | Result                          |
 |------------------------------------------|---------------------------------|
@@ -174,26 +175,54 @@ guessed number — low-confidence cases return `vehicleNumber: null`
 The three "good" plates match `supabase/seed.sql`, so an upload produces a real
 green / amber / red result end to end.
 
+### The Gemini path (`VITE_AI_PROVIDER=gemini`)
+
+```
+browser: geminiProvider  ──POST {imageBase64, mimeType}──▶  Edge Function
+                                                              extract-ride-details
+                                                              (GEMINI_API_KEY secret)
+                                                                     │
+                                                              Gemini generateContent
+                                                              (responseSchema = structured)
+                                                                     │
+browser ◀──── ExtractedRideDetails JSON ─────────────────────────────┘
+   │
+   └─ confidence gate (index.ts) → success | low_confidence | error
+```
+
+- Function code: `supabase/functions/extract-ride-details/` — `index.ts` (Deno HTTP
+  server, CORS, env, fetch) + `gemini.ts` (pure prompt / schema / response-mapping,
+  unit-tested by `scripts/test-lib.mjs`).
+- Model is `GEMINI_MODEL` (default `gemini-2.0-flash`) — cheap, fast, good OCR, JSON
+  mode. Swap without code changes.
+- Prompt forbids guessing: an illegible plate → `vehicle_number: null`; the mapper
+  also forces `confidence.vehicleNumber = 0` whenever the number is null.
+- No auth (`--no-verify-jwt`); the browser still sends the anon key as `apikey`.
+- The screenshot is never stored — it exists only for the request (`§18`).
+- Deploy + secrets: see `DEPLOYMENT.md`.
+
 **Not implemented yet:** `classifyReport` (Phase 4) and `moderateContent` (Phase 5)
-are named in `PROJECT_CONTEXT.md` §32 but not on the `AIProvider` interface yet. Real
-Gemini is a future `providers['gemini']` entry — and because a Vite build ships all
-code to the browser, that provider must call Gemini via a server-side function (e.g. a
-Supabase Edge Function), not with a `VITE_` API key.
+are named in `PROJECT_CONTEXT.md` §32 but not on the `AIProvider` interface yet.
 
 ---
 
 ## 5. Database
 
-Schema migration: `supabase/migrations/20260910053117_create_spotrealredflag_schema.sql`
-(its top comment is the authoritative description). Seed data for local testing:
-`supabase/seed.sql`.
+Migrations (run in order, in the Supabase SQL Editor — each has an authoritative
+top comment):
+
+1. `supabase/migrations/20260910053117_create_spotrealredflag_schema.sql` — core tables.
+2. `supabase/migrations/20260910073537_spam_safeguards.sql` — `client_key` columns +
+   `reports` CHECK constraints + indexes (see §5a).
+
+Seed data for testing: `supabase/seed.sql`.
 
 | Table             | Purpose                                    | Key columns                                                                 |
 |-------------------|--------------------------------------------|---------------------------------------------------------------------------|
 | `vehicles`        | One row per distinct vehicle               | `registration_number` (raw), `normalized_registration_number` (**unique**) |
-| `reports`         | Community-submitted reports                | `vehicle_id` FK, `platform`, `categories text[]`, `description`, `ride_date`, `status` (default `'active'`) |
+| `reports`         | Community-submitted reports                | `vehicle_id` FK, `platform`, `categories text[]`, `description`, `ride_date`, `status` (default `'active'`), `client_key` |
 | `report_evidence` | Optional evidence files (schema only, unused by the app yet) | `report_id` FK, `storage_path`, `expires_at` (retention) |
-| `searches`        | Audit log of every check (analytics / future abuse detection) | `vehicle_id` FK (nullable), `search_term` (raw), `platform` |
+| `searches`        | Audit log of every check (analytics / abuse detection) | `vehicle_id` FK (nullable), `search_term` (raw), `platform`, `client_key` |
 
 - IDs are `uuid` via `gen_random_uuid()` (needs the `pgcrypto` extension — the
   migration enables it).
@@ -214,13 +243,45 @@ Edge Function or the service-role key), never from the browser.
 
 ---
 
+## 5a. Spam / abuse safeguards (lightweight, pre-launch)
+
+Migration `20260910073537_spam_safeguards.sql` + `src/lib/data.ts` +
+`src/lib/reportValidation.ts` + `src/lib/clientKey.ts`. No new infrastructure.
+
+| Safeguard              | Where enforced                                     | Rule |
+|------------------------|----------------------------------------------------|------|
+| Min description length | JS (`reportValidation.ts`) + DB `CHECK`            | trimmed `description` ≥ 20 chars |
+| No contact info        | JS (`reportValidation.ts`) + DB `CHECK`            | reject Indian mobile numbers, 10+ digit runs (spaces/hyphens ignored), email addresses |
+| Report rate limit      | JS (`data.ts`, `COUNT` on `reports`)               | ≤ 3 reports per `client_key` per 60 min |
+| Duplicate report       | JS (`data.ts`)                                     | same `vehicle_id` + same description text within 24 h is rejected |
+
+- `client_key` — a random id in `localStorage` (`src/lib/clientKey.ts`). **Not auth**,
+  no PII (`PROJECT_CONTEXT.md` §4). Written to `reports.client_key` and
+  `searches.client_key`.
+- The DB `CHECK` constraints are the unbypassable backstop (a client hitting PostgREST
+  directly still can't insert a phone number or a 5-char description). The JS checks
+  just produce a friendly message first; `submitReport` also maps a constraint
+  violation back to a readable error.
+- Rate-limit / dedupe thresholds are the tunable part and live in `data.ts` constants.
+
+---
+
 ## 6. Environment variables
+
+### Frontend (`VITE_*` — safe in the browser bundle)
 
 | Variable                 | Read in                | Notes                                          |
 |--------------------------|------------------------|-----------------------------------------------|
-| `VITE_SUPABASE_URL`      | `src/lib/supabase.ts`  | `https://<project-ref>.supabase.co`           |
-| `VITE_SUPABASE_ANON_KEY` | `src/lib/supabase.ts`  | anon **public** key                            |
-| `VITE_AI_PROVIDER`       | `src/lib/ai/index.ts`  | optional; `"mock"` (default). Only `"mock"` is implemented. |
+| `VITE_SUPABASE_URL`      | `src/lib/supabase.ts`, `src/lib/ai/geminiProvider.ts` | `https://<project-ref>.supabase.co` |
+| `VITE_SUPABASE_ANON_KEY` | `src/lib/supabase.ts`, `src/lib/ai/geminiProvider.ts` | anon **public** key |
+| `VITE_AI_PROVIDER`       | `src/lib/ai/index.ts`  | `"mock"` (default) or `"gemini"` |
+
+### Server (Supabase Edge Function secrets — **never** `VITE_`, never in the bundle)
+
+| Secret           | Used by                                  | Notes                          |
+|------------------|------------------------------------------|--------------------------------|
+| `GEMINI_API_KEY` | `supabase/functions/extract-ride-details` | from Google AI Studio          |
+| `GEMINI_MODEL`   | same (optional)                          | default `gemini-2.0-flash`      |
 
 - Vite only exposes vars prefixed `VITE_` to client code, via `import.meta.env`.
   Types for these are declared in `src/vite-env.d.ts`.
@@ -234,23 +295,18 @@ Edge Function or the service-role key), never from the browser.
   already allow any anonymous visitor to do (read all rows, insert reports/searches).
   The **service-role key must never** be put in this project or any `VITE_` var.
 
-### Connecting a Supabase project (Phase 2 setup)
+### Setup / deploy
 
-1. `npm install`
-2. In the Supabase dashboard → **Project Settings → API**, copy the **Project URL** and
-   the **anon public** key.
-3. `cp .env.example .env` and paste both values in.
-4. If the schema is not yet applied to that project: open the Supabase **SQL Editor**,
-   paste `supabase/migrations/20260910053117_create_spotrealredflag_schema.sql`, run it.
-   (It is idempotent.)
-5. Optional: paste `supabase/seed.sql` into the SQL Editor and run it for test data
-   (three vehicles covering green / amber / red).
-6. `npm run dev`.
+Local dev: `npm install`, `cp .env.example .env` (fill in Supabase URL + anon key,
+leave `VITE_AI_PROVIDER=mock`), `npm run dev`.
 
-There is currently **no Supabase CLI project** (`supabase/config.toml` does not exist)
-and no Docker-based local stack — the schema is applied by hand via the SQL Editor.
-Adding `supabase init` + `supabase db push` is a reasonable later step if the team wants
-CLI-managed migrations.
+Applying migrations, deploying the Edge Function + secrets, going to `gemini`, and
+deploying the frontend to Vercel: **see `DEPLOYMENT.md`** (the full runbook, with the
+exact Vercel env vars and Supabase secrets to set).
+
+`supabase/config.toml` exists (project ref + `verify_jwt = false` for the function).
+`supabase` CLI is a devDependency — use `npx supabase ...`. No Docker-based local
+stack; migrations are applied via the SQL Editor or `npx supabase db push`.
 
 ---
 
@@ -259,10 +315,10 @@ CLI-managed migrations.
 | Area                                  | Status                                                      | Phase |
 |---------------------------------------|------------------------------------------------------------|-------|
 | Supabase wired to real data           | **Done** — `src/lib/data.ts` is fully Supabase-backed       | 2     |
-| AI provider abstraction + upload flow  | **Done (mock)** — `src/lib/ai/` + `analyzeScreenshot` wired into upload, with the `cantRead` low-confidence branch | 3 |
-| Real Gemini extraction                 | Not started — needs a server-side function (Edge Function) to hold the key; then add `providers['gemini']` | 3 |
+| AI provider abstraction + upload flow  | **Done** — `src/lib/ai/` + `analyzeScreenshot`, `cantRead` low-confidence branch | 3 |
+| Real Gemini extraction                 | **Done (code)** — `geminiProvider` + `extract-ride-details` Edge Function; needs deploy + `GEMINI_API_KEY` secret + `VITE_AI_PROVIDER=gemini` (`DEPLOYMENT.md`) | 3 |
+| Lightweight spam / abuse safeguards    | **Done** — see §5a. Full abuse system (scoring, bot detection) still later | 5 |
 | AI report categorisation              | Not started — categories are user-selected checkboxes       | 4     |
-| Abuse / spam / rate limiting          | Not started — `searches` table exists to support it later   | 5     |
 | Evidence upload UI + Storage + retention | Not started — `report_evidence` table exists, no UI, "Add screenshot" button is inert | 5–6 |
 | Informational pages (Safety/Privacy/Terms/How it works) | Placeholder buttons in `FooterLinks` / `Header`, no routes | 6 |
 | PWA polish (service worker, offline)  | `public/manifest.json` exists; no service worker registered | 6     |
@@ -296,15 +352,22 @@ mechanics and `PROJECT_CONTEXT.md` as the source of truth for product decisions.
 
 ---
 
-## 9. Local browser check — `npm run screenshot`
+## 9. Tests / local checks
 
-`scripts/drive.mjs` (Playwright, `channel: 'chrome'` — uses installed Chrome, no
-bundled browser) drives the running app at 390 px width and screenshots each state
-into `./screenshots/` (git-ignored). It fails on any console or page error.
+| Command             | What it does                                                                 |
+|---------------------|----------------------------------------------------------------------------|
+| `npm run typecheck` | `tsc --noEmit` over `src` (not `supabase/functions` — that's Deno).           |
+| `npm run lint`      | ESLint over `src` + `scripts` (`supabase/functions` is ignored).             |
+| `npm run test:lib`  | Offline unit tests: report content rules (`reportValidation.ts`) + Gemini response mapping (`extract-ride-details/gemini.ts`). Bundles the TS with esbuild, asserts, exits non-zero on failure. |
+| `npm run test:gemini` | `GEMINI_API_KEY=… npm run test:gemini -- path/to/shot.png` — live call to the real Gemini API with the function's exact prompt/schema; prints the mapped result + whether the gate passes. No deploy needed. |
+| `npm run screenshot`| Playwright (`channel: 'chrome'` — installed Chrome, no bundled browser) drives the running app at 390 px and screenshots each state into `./screenshots/` (git-ignored). Fails on any console/page error. |
 
-Prereq: `npm run dev` running on `http://localhost:5173` (override with `APP_URL`).
+`npm run screenshot` prereq: `npm run dev` on `http://localhost:5173` (override with
+`APP_URL`). Path it walks: Home → upload `scripts/fixtures/ride.png` → red result →
+"Check another ride" → upload `scripts/fixtures/blur.png` → `cantRead` screen → "Enter
+vehicle number manually" → type `KA 03 CD 4567` → amber. Fixtures are 1×1 PNGs; the
+mock provider keys off their file names (§4a).
 
-Path it walks: Home → upload `scripts/fixtures/ride.png` → red result → "Check another
-ride" → upload `scripts/fixtures/blur.png` → `cantRead` screen → "Enter vehicle number
-manually" → type `KA 03 CD 4567` → amber result. The fixtures are 1×1 PNGs; the mock
-provider keys off their file names (§4a).
+> Against a DB where migration 2 (`spam_safeguards`) isn't applied yet, `npm run
+> screenshot` reports two console `400`s (the `searches.client_key` insert) — expected
+> until the migration runs, then clean.

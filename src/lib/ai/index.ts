@@ -1,4 +1,5 @@
 import { mockProvider } from './mockProvider';
+import { geminiProvider } from './geminiProvider';
 import type { AIProvider, ExtractionOutcome } from './types';
 
 export type {
@@ -18,11 +19,12 @@ export const VEHICLE_NUMBER_CONFIDENCE_THRESHOLD = 0.8;
 
 const providers: Record<string, AIProvider> = {
   mock: mockProvider,
+  gemini: geminiProvider,
 };
 
 /**
  * Resolve the active AI provider from `VITE_AI_PROVIDER` (default: "mock").
- * Only "mock" exists today; real providers (e.g. "gemini") register in `providers`.
+ * "gemini" routes through the extract-ride-details Supabase Edge Function.
  */
 export function getAIProvider(): AIProvider {
   const requested = import.meta.env?.VITE_AI_PROVIDER ?? 'mock';

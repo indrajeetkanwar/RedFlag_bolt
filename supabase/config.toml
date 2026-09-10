@@ -1,0 +1,7 @@
+# Minimal Supabase CLI config. `supabase link --project-ref yojnyfsatgevqbdjmmqm`
+# fills in the rest from the hosted project.
+project_id = "yojnyfsatgevqbdjmmqm"
+
+# No auth in this app (PROJECT_CONTEXT.md §4) — the extraction function is public.
+[functions.extract-ride-details]
+verify_jwt = false

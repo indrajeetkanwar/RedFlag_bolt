@@ -1,6 +1,18 @@
 import { supabase } from './supabase';
 import { normalizeRegistration } from './normalize';
+import { getClientKey } from './clientKey';
+import { validateDescription } from './reportValidation';
 import type { Vehicle, Report, ResultKind, VehicleCheckResult, CommunityReportView } from './types';
+
+/** Lightweight rate limit: reports allowed per browser (client_key) per window. */
+const MAX_REPORTS_PER_WINDOW = 3;
+const REPORT_WINDOW_MINUTES = 60;
+/** A report with the same vehicle + same text inside this window is treated as a duplicate. */
+const DUPLICATE_WINDOW_HOURS = 24;
+
+function minutesAgoISO(minutes: number): string {
+  return new Date(Date.now() - minutes * 60_000).toISOString();
+}
 
 export async function checkVehicle(registrationNumber: string): Promise<VehicleCheckResult> {
   const normalized = normalizeRegistration(registrationNumber);
@@ -26,8 +38,9 @@ export async function checkVehicle(registrationNumber: string): Promise<VehicleC
 
   const reportCount = reports.length;
   const distinctCategories = new Set(reports.flatMap((r) => r.categories));
-  let resultKind: ResultKind = 'clear';
 
+  // Deterministic classification — never AI (PROJECT_CONTEXT.md §10).
+  let resultKind: ResultKind = 'clear';
   if (reportCount >= 3 && distinctCategories.size >= 2) {
     resultKind = 'red';
   } else if (reportCount >= 1) {
@@ -37,6 +50,7 @@ export async function checkVehicle(registrationNumber: string): Promise<VehicleC
   await supabase.from('searches').insert({
     vehicle_id: vehicle?.id ?? null,
     search_term: registrationNumber,
+    client_key: getClientKey(),
   });
 
   return {
@@ -78,8 +92,32 @@ export async function submitReport(params: {
   description: string;
   rideDate: string;
 }): Promise<{ success: boolean; error?: string }> {
-  const normalized = normalizeRegistration(params.registrationNumber);
+  // 1. Content rules (privacy + minimum usefulness). Mirrored server-side as CHECK
+  //    constraints — this is just the friendly message.
+  const contentCheck = validateDescription(params.description);
+  if (!contentCheck.ok) {
+    return { success: false, error: contentCheck.message };
+  }
 
+  const clientKey = getClientKey();
+  const normalized = normalizeRegistration(params.registrationNumber);
+  const description = params.description.trim();
+
+  // 2. Rate limit per browser.
+  const { count: recentCount } = await supabase
+    .from('reports')
+    .select('id', { count: 'exact', head: true })
+    .eq('client_key', clientKey)
+    .gte('created_at', minutesAgoISO(REPORT_WINDOW_MINUTES));
+
+  if ((recentCount ?? 0) >= MAX_REPORTS_PER_WINDOW) {
+    return {
+      success: false,
+      error: "You've submitted a few reports recently. Please wait a little while before adding another.",
+    };
+  }
+
+  // 3. Resolve (or create) the vehicle row.
   const { data: existingVehicle } = await supabase
     .from('vehicles')
     .select('id')
@@ -103,17 +141,43 @@ export async function submitReport(params: {
     }
 
     vehicleId = newVehicle.id;
+  } else {
+    // 4. Duplicate check — same vehicle + same text in the recent window.
+    const { data: recentForVehicle } = await supabase
+      .from('reports')
+      .select('description')
+      .eq('vehicle_id', vehicleId)
+      .gte('created_at', minutesAgoISO(DUPLICATE_WINDOW_HOURS * 60));
+
+    const isDuplicate = (recentForVehicle ?? []).some(
+      (r) => (r.description ?? '').trim().toLowerCase() === description.toLowerCase()
+    );
+
+    if (isDuplicate) {
+      return { success: false, error: 'Looks like this report has already been submitted for this vehicle.' };
+    }
   }
 
   const { error: reportError } = await supabase.from('reports').insert({
     vehicle_id: vehicleId,
     platform: params.platform,
     categories: params.categories,
-    description: params.description,
+    description,
     ride_date: params.rideDate || null,
+    client_key: clientKey,
   });
 
   if (reportError) {
+    // The server CHECK constraints can still reject content the client regex missed.
+    if (reportError.message.includes('reports_description_no_contact')) {
+      return {
+        success: false,
+        error: 'Please remove phone numbers, emails, or other contact details from the description.',
+      };
+    }
+    if (reportError.message.includes('reports_description_min_length')) {
+      return { success: false, error: 'Please add a bit more detail to the description.' };
+    }
     return { success: false, error: reportError.message };
   }
 
