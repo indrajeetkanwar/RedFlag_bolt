@@ -1,0 +1,17 @@
+{
+  "name": "SpotRealRedFlag",
+  "short_name": "SpotRealRedFlag",
+  "description": "A community ride safety radar for women.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#fbf9f6",
+  "theme_color": "#fbf9f6",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}
