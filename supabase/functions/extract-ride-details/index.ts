@@ -27,31 +27,22 @@ import {
   genericError,
   enforceIpRateLimit,
   sniffImageMime,
+  callGeminiGenerate,
 } from '../_shared/security.ts';
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') ?? '';
-const GEMINI_MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.6-flash';
+const GEMINI_MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-2.5-flash';
 
 // 4 MB image ≈ 5.6M base64 chars (4 * 1024 * 1024 * 4 / 3).
 const MAX_BASE64_CHARS = 5_600_000;
 
 async function callGemini(imageBase64: string, mimeType: string): Promise<ExtractedRideDetails> {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildGeminiRequestBody(imageBase64, mimeType)),
-    }
+  const data = await callGeminiGenerate(
+    GEMINI_MODEL,
+    GEMINI_API_KEY,
+    buildGeminiRequestBody(imageBase64, mimeType)
   );
-
-  if (!res.ok) {
-    // Log the real reason server-side; never proxy the provider body to the client.
-    console.error('Gemini API error', res.status, (await res.text()).slice(0, 500));
-    throw new Error('gemini_upstream_error');
-  }
-
-  return parseGeminiResponse(await res.json());
+  return parseGeminiResponse(data);
 }
 
 Deno.serve(async (req: Request) => {

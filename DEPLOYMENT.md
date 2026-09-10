@@ -68,7 +68,7 @@ npx supabase link --project-ref yojnyfsatgevqbdjmmqm
 
 # server-side secrets (NOT VITE_ vars, never in the frontend / Vercel)
 npx supabase secrets set GEMINI_API_KEY=your-gemini-key
-npx supabase secrets set GEMINI_MODEL=gemini-3.6-flash                    # optional (default)
+npx supabase secrets set GEMINI_MODEL=gemini-2.5-flash                    # optional (default)
 npx supabase secrets set IP_HASH_SALT=$(openssl rand -hex 32)            # salts the ai_calls IP hash
 # ALLOWED_ORIGIN — set AFTER you have the Vercel URL (step 3):
 #   npx supabase secrets set ALLOWED_ORIGIN=https://your-app.vercel.app
@@ -176,7 +176,7 @@ VITE_AI_PROVIDER        = gemini
 
 ```
 GEMINI_API_KEY  = <from Google AI Studio>
-GEMINI_MODEL    = gemini-3.6-flash                  (optional, this is the default)
+GEMINI_MODEL    = gemini-2.5-flash                  (optional, this is the default)
 IP_HASH_SALT    = <openssl rand -hex 32>            (salts the ai_calls IP hash)
 ALLOWED_ORIGIN  = https://your-app.vercel.app       (set in step 3d, after deploy)
 ```

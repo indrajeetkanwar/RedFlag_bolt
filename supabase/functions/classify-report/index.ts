@@ -20,29 +20,26 @@
 // @ts-nocheck — runs on Deno (Edge runtime), not under the app's tsconfig.
 
 import { buildGeminiRequestBody, parseGeminiResponse, type ReportClassification } from './classify.ts';
-import { resolveCors, jsonResponse, genericError, enforceIpRateLimit } from '../_shared/security.ts';
+import {
+  resolveCors,
+  jsonResponse,
+  genericError,
+  enforceIpRateLimit,
+  callGeminiGenerate,
+} from '../_shared/security.ts';
 
 const GEMINI_API_KEY = Deno.env.get('GEMINI_API_KEY') ?? '';
-const GEMINI_MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-3.6-flash';
+const GEMINI_MODEL = Deno.env.get('GEMINI_MODEL') ?? 'gemini-2.5-flash';
 
 const MAX_DESCRIPTION_CHARS = 4000;
 
 async function callGemini(description: string): Promise<ReportClassification> {
-  const res = await fetch(
-    `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${GEMINI_API_KEY}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(buildGeminiRequestBody(description)),
-    }
+  const data = await callGeminiGenerate(
+    GEMINI_MODEL,
+    GEMINI_API_KEY,
+    buildGeminiRequestBody(description)
   );
-
-  if (!res.ok) {
-    console.error('Gemini API error', res.status, (await res.text()).slice(0, 500));
-    throw new Error('gemini_upstream_error');
-  }
-
-  return parseGeminiResponse(await res.json());
+  return parseGeminiResponse(data);
 }
 
 Deno.serve(async (req: Request) => {

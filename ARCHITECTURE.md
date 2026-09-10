@@ -91,8 +91,8 @@ Other components in the file: `Header`, `BottomNav`, `FooterLinks`.
 `handleFile` reads the picked `File` and calls `analyzeScreenshot(file)`:
 
 1. `setScreen('analyzing')`
-2. `extractRideDetails(file)` from `@/lib/ai` (see §4a) — currently the **mock**
-   provider, no SDK, no network.
+2. `extractRideDetails(file)` from `@/lib/ai` (see §4a) — `mock` provider (offline)
+   or `gemini` provider (Edge Function), per `VITE_AI_PROVIDER`.
 3. `status: 'success'` → set `vehicleNumber` to the read plate, then
    `lookupAndShow()` → `checkVehicle()` → `result`.
 4. `status: 'low_confidence'` or `'error'` → `setScreen('cantRead')`. The app **never**
@@ -198,10 +198,11 @@ browser ◀──── ExtractedRideDetails JSON ──────────
 
 - Function code: `supabase/functions/extract-ride-details/` — `index.ts` (Deno HTTP
   server) + `gemini.ts` (pure prompt / schema / response-mapping, unit-tested by
-  `scripts/test-lib.mjs`). Shared hardening in `supabase/functions/_shared/`
-  (`security.ts` = CORS + rate limit, `image.ts` = magic-byte sniff).
-- Model is `GEMINI_MODEL` (default `gemini-3.6-flash`) — cheap, fast, good OCR, JSON
-  mode. Swap without code changes.
+  `scripts/test-lib.mjs`). Shared code in `supabase/functions/_shared/`
+  (`security.ts` = CORS + rate limit + `callGeminiGenerate`, `image.ts` = magic-byte sniff).
+- Model is `GEMINI_MODEL` (default `gemini-2.5-flash`) — cheap, fast, good OCR, JSON
+  mode. Swap without code changes. `callGeminiGenerate` retries 3× with backoff on a
+  429 / 5xx ("model is experiencing high demand"); a final failure → generic error.
 - Prompt forbids guessing: an illegible plate → `vehicle_number: null`; the mapper
   also forces `confidence.vehicleNumber = 0` whenever the number is null.
 - No auth (`--no-verify-jwt`); the browser still sends the anon key as `apikey`.
@@ -334,7 +335,7 @@ Migration `20260910073537_spam_safeguards.sql` + `src/lib/data.ts` +
 | Secret           | Used by                                  | Notes                          |
 |------------------|------------------------------------------|--------------------------------|
 | `GEMINI_API_KEY` | both Edge Functions                       | from Google AI Studio          |
-| `GEMINI_MODEL`   | both (optional)                          | default `gemini-3.6-flash`      |
+| `GEMINI_MODEL`   | both (optional)                          | default `gemini-2.5-flash`      |
 | `ALLOWED_ORIGIN` | both (`_shared/security.ts`)             | the Vercel site URL. Unset ⇒ only `localhost:5173` allowed. Set after the Vercel URL exists. |
 | `IP_HASH_SALT`   | both (`_shared/security.ts`)             | random 32-byte hex; salts the IP hash for `ai_calls`. Unset ⇒ a weak built-in fallback + a console warning. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | both (rate limit) | **auto-injected** by Supabase into deployed functions — do not set manually. |

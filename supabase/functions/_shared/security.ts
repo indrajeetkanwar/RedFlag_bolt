@@ -55,6 +55,55 @@ export function genericError(cors: Cors, status = 502): Response {
   return jsonResponse({ error: 'Something went wrong — please try again.' }, status, cors);
 }
 
+const RETRIABLE_GEMINI_STATUS = new Set([429, 500, 502, 503, 504]);
+
+/**
+ * POST to Gemini generateContent with retry on transient failures (429 rate limit,
+ * 5xx overload — "model is experiencing high demand"). 3 attempts, ~0.5s then ~1.5s
+ * backoff. The real upstream status/body is logged server-side; on final failure a
+ * plain Error is thrown so the caller returns a generic message to the client.
+ */
+export async function callGeminiGenerate(
+  model: string,
+  apiKey: string,
+  body: unknown
+): Promise<unknown> {
+  const url =
+    `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  const payload = JSON.stringify(body);
+  let lastStatus = 0;
+
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt > 0) {
+      await new Promise((r) => setTimeout(r, attempt === 1 ? 500 : 1500));
+    }
+
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+      });
+    } catch (err) {
+      console.error('Gemini fetch failed (attempt', attempt + 1, '):', err);
+      lastStatus = 0;
+      continue;
+    }
+
+    if (res.ok) return await res.json();
+
+    lastStatus = res.status;
+    console.error(
+      `Gemini API error ${res.status} (attempt ${attempt + 1}):`,
+      (await res.text()).slice(0, 400)
+    );
+    if (!RETRIABLE_GEMINI_STATUS.has(res.status)) break;
+  }
+
+  throw new Error(`gemini_upstream_error_${lastStatus}`);
+}
+
 async function sha256Hex(input: string): Promise<string> {
   const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(input));
   return Array.from(new Uint8Array(digest))
