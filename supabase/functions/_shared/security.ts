@@ -10,7 +10,8 @@ import { createClient } from 'npm:@supabase/supabase-js@2';
 
 export { sniffImageMime } from './image.ts';
 
-const LOCAL_DEV_ORIGIN = 'http://localhost:5173';
+// Any localhost / 127.0.0.1 port — Vite may bump 5173 -> 5174 etc. if a port is busy.
+const LOCAL_DEV_ORIGIN = /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
 const RATE_LIMIT_PER_HOUR = 10;
 const DEFAULT_SALT = 'srrf-unsalted-set-IP_HASH_SALT'; // fallback only; set the secret
 
@@ -27,17 +28,20 @@ export interface Cors {
 }
 
 /**
- * Resolve CORS for a request against the allowlist:
- * `ALLOWED_ORIGIN` secret (the Vercel URL) + `http://localhost:5173`.
- * Requests with no `Origin` header (curl, server-to-server) are allowed through —
- * they can't be CSRF and are still covered by the IP rate limit.
+ * Resolve CORS for a request. Allowed origins:
+ *   - the `ALLOWED_ORIGIN` secret (the deployed Vercel URL)
+ *   - any localhost / 127.0.0.1 port (local dev)
+ * A request with no `Origin` header (curl, server-to-server) passes — it can't be
+ * CSRF and is still covered by the IP rate limit. Any other browser origin → 403.
  */
 export function resolveCors(req: Request): Cors {
-  const allowlist = [Deno.env.get('ALLOWED_ORIGIN'), LOCAL_DEV_ORIGIN].filter(Boolean) as string[];
   const origin = req.headers.get('Origin');
-
   if (!origin) return { headers: { ...BASE_CORS }, forbidden: false };
-  if (allowlist.includes(origin)) {
+
+  const prodOrigin = Deno.env.get('ALLOWED_ORIGIN');
+  const allowed = origin === prodOrigin || LOCAL_DEV_ORIGIN.test(origin);
+
+  if (allowed) {
     return { headers: { ...BASE_CORS, 'Access-Control-Allow-Origin': origin }, forbidden: false };
   }
   return { headers: { ...BASE_CORS }, forbidden: true };

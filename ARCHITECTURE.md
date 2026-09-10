@@ -208,9 +208,9 @@ browser ◀──── ExtractedRideDetails JSON ──────────
 - No auth (`--no-verify-jwt`); the browser still sends the anon key as `apikey`.
 - The screenshot is never stored — it exists only for the request (`§18`).
 - **Hardening (both functions):**
-  - CORS allowlist — `ALLOWED_ORIGIN` secret (the Vercel URL) + `http://localhost:5173`.
-    A browser request from any other `Origin` gets `403`. Requests with no `Origin`
-    (curl/server) pass but are still rate-limited.
+  - CORS allowlist — `ALLOWED_ORIGIN` secret (the Vercel URL) + any `localhost` /
+    `127.0.0.1` port (local dev). A browser request from any other `Origin` gets
+    `403`. Requests with no `Origin` (curl/server) pass but are still rate-limited.
   - Per-IP rate limit — ≤ 10 calls per IP per hour per function, tracked in the
     `ai_calls` table (SHA-256 of `IP_HASH_SALT:ip`, never the raw IP). Over the limit
     → `429`, generic message. Fails open on a DB error.
@@ -336,7 +336,7 @@ Migration `20260910073537_spam_safeguards.sql` + `src/lib/data.ts` +
 |------------------|------------------------------------------|--------------------------------|
 | `GEMINI_API_KEY` | both Edge Functions                       | from Google AI Studio          |
 | `GEMINI_MODEL`   | both (optional)                          | default `gemini-2.5-flash`      |
-| `ALLOWED_ORIGIN` | both (`_shared/security.ts`)             | the Vercel site URL. Unset ⇒ only `localhost:5173` allowed. Set after the Vercel URL exists. |
+| `ALLOWED_ORIGIN` | both (`_shared/security.ts`)             | the Vercel site URL. Unset ⇒ only local dev (`localhost` / `127.0.0.1`, any port) is allowed. Set after the Vercel URL exists. |
 | `IP_HASH_SALT`   | both (`_shared/security.ts`)             | random 32-byte hex; salts the IP hash for `ai_calls`. Unset ⇒ a weak built-in fallback + a console warning. |
 | `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | both (rate limit) | **auto-injected** by Supabase into deployed functions — do not set manually. |
 

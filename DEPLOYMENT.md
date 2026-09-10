@@ -72,7 +72,7 @@ npx supabase secrets set GEMINI_MODEL=gemini-2.5-flash                    # opti
 npx supabase secrets set IP_HASH_SALT=$(openssl rand -hex 32)            # salts the ai_calls IP hash
 # ALLOWED_ORIGIN — set AFTER you have the Vercel URL (step 3):
 #   npx supabase secrets set ALLOWED_ORIGIN=https://your-app.vercel.app
-# Until it's set, only http://localhost:5173 is allowed as a browser Origin.
+# Until it's set, only a local dev origin (localhost / 127.0.0.1, any port) is allowed.
 
 # deploy both (public — no auth, per PROJECT_CONTEXT.md §4)
 npx supabase functions deploy extract-ride-details --no-verify-jwt
@@ -157,7 +157,7 @@ npx supabase functions deploy classify-report --no-verify-jwt
 ```
 
 Until this is set, the deployed site's calls to the functions will be `403`ed
-(only `localhost:5173` is allowed). If you use Vercel preview URLs, either add the
+(only local dev origins are allowed). If you use Vercel preview URLs, either add the
 specific preview origin too or test previews against `localhost`.
 
 ---
