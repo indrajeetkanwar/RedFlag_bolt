@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"$CLAUDE_PROJECT_DIR/.claude/hooks/block-main-writes.mjs\"",
+            "if": "Bash(git *)",
+            "timeout": 10,
+            "statusMessage": "Checking branch policy (no direct writes to main)"
+          }
+        ]
+      }
+    ]
+  }
+}
